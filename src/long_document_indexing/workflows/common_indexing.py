@@ -3,7 +3,7 @@ from __future__ import annotations
 from long_document_indexing.config import SharedPipelineConfig
 from long_document_indexing.domain.corpus import Corpus
 from long_document_indexing.domain.maps import IndexArtifact
-from long_document_indexing.domain.runs import RunContext
+from long_document_indexing.domain.runs import RunContext, UsageRecord
 from long_document_indexing.services import Services
 from long_document_indexing.systems.base import RagSystem
 from long_document_indexing.telemetry.tracing import stable_index_run_id
@@ -37,6 +37,15 @@ async def run_indexing_workflow(
         f"workflows/indexing/{system.id}/{corpus.id}.json",
         result.record,
     )
+    usage_payload = result.output.build_metadata.get("usage")
+    if isinstance(usage_payload, dict):
+        services.usage_ledger.record_usage(
+            context,
+            stage="index_system",
+            kind="system",
+            usage=UsageRecord.model_validate(usage_payload),
+            metadata={"workflow_name": WORKFLOW_NAME},
+        )
     services.usage_ledger.record_usage(
         context,
         stage=WORKFLOW_NAME,

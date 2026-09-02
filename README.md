@@ -19,13 +19,13 @@ Python 3.12 or 3.13 is required. Python 3.14 release candidates are intentionall
 
 ```bash
 uv sync --python 3.13 --extra dev
-uv run --python 3.13 --no-editable ldi run --config configs/experiments/smoke-test.yaml
+uv run --python 3.13 --no-editable --reinstall-package long-document-indexing ldi run --config configs/experiments/smoke-test.yaml
 uv run --python 3.13 --extra dev pytest
 ```
 
 The smoke run writes artifacts under `artifacts/`, which is ignored by git.
 
-The CLI command uses `--no-editable` because some macOS Python 3.13 environments skip editable-install `.pth` files inside hidden virtualenv directories. Tests still run against `src/` through pytest configuration.
+The CLI command uses `--no-editable` because some macOS Python 3.13 environments skip editable-install `.pth` files inside hidden virtualenv directories. The explicit package reinstall keeps the console script aligned with local source changes while the repo is under active development. Tests still run against `src/` through pytest configuration.
 
 ## Current Shape
 

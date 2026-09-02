@@ -3,15 +3,13 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import re
 from collections import Counter
 from pathlib import Path
 from typing import Any
 
 from long_document_indexing.domain.corpus import Corpus
 from long_document_indexing.domain.runs import RetrievedItem
-
-_TOKEN_RE = re.compile(r"[A-Za-z0-9_]+")
+from long_document_indexing.text import tokenize
 
 
 class LocalVectorBackend:
@@ -35,7 +33,7 @@ class LocalVectorBackend:
 
         for document in corpus.documents:
             for segment in sorted(document.segments, key=lambda item: item.order):
-                term_counts = Counter(_tokenize(segment.text))
+                term_counts = Counter(tokenize(segment.text))
                 term_counts_by_record.append(term_counts)
                 document_frequencies.update(term_counts.keys())
                 records.append(
@@ -75,7 +73,7 @@ class LocalVectorBackend:
 
         index = self._load(index_id)
         allowed = set(document_ids) if document_ids is not None else None
-        query_weights = _weights(Counter(_tokenize(query)), index["idf"])
+        query_weights = _weights(Counter(tokenize(query)), index["idf"])
         query_norm = _norm(query_weights)
 
         scored = []
@@ -120,10 +118,6 @@ class LocalVectorBackend:
                 raise FileNotFoundError(f"retrieval index not found: {path}")
             self._indexes[index_id] = json.loads(path.read_text(encoding="utf-8"))
         return self._indexes[index_id]
-
-
-def _tokenize(text: str) -> list[str]:
-    return [match.group(0).lower() for match in _TOKEN_RE.finditer(text)]
 
 
 def _weights(term_counts: Counter[str], idf: dict[str, float]) -> dict[str, float]:

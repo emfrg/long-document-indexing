@@ -1,0 +1,7 @@
+system:
+  id: map_reduce
+  type: native
+  indexing_strategy: map_reduce
+  retrieval_backend: local_vector
+  reduce_fan_in: 8
+

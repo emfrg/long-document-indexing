@@ -1,0 +1,7 @@
+system:
+  id: refine
+  type: native
+  indexing_strategy: refine
+  retrieval_backend: local_vector
+  segment_order: document_order
+

@@ -12,7 +12,9 @@ from long_document_indexing.datasets.base import LoadedDataset
 from long_document_indexing.datasets.registry import create_dataset_adapter
 from long_document_indexing.domain.maps import IndexArtifact
 from long_document_indexing.domain.runs import MetricRecord, RagRunRecord
+from long_document_indexing.evaluation.local.maps import evaluate_index_artifact
 from long_document_indexing.evaluation.runner import aggregate_metric_means, evaluate_run
+from long_document_indexing.models.fake import FakeTextGenerationClient
 from long_document_indexing.prompts import PromptLoader
 from long_document_indexing.retrieval.local_vector import LocalVectorBackend
 from long_document_indexing.services import Services
@@ -161,6 +163,7 @@ def _evaluate(config: ExperimentConfig) -> None:
     items_by_id = {item.id: item for item in loaded.question_set.items}
 
     metrics: list[MetricRecord] = []
+    artifacts = _load_index_artifacts(store)
     for system_id in config.systems:
         system = create_system(system_id)
         records = [
@@ -173,6 +176,18 @@ def _evaluate(config: ExperimentConfig) -> None:
                     items_by_id[record.item_id],
                     corpora_by_id[record.corpus_id],
                     config.evaluation.local,
+                )
+            )
+        for artifact in artifacts:
+            if artifact.system_id != system.id:
+                continue
+            metrics.extend(
+                evaluate_index_artifact(
+                    artifact,
+                    corpora_by_id[artifact.corpus_id],
+                    store,
+                    config.evaluation.local,
+                    experiment_id=config.experiment.id,
                 )
             )
 
@@ -217,6 +232,7 @@ def _services(config: ExperimentConfig) -> Services:
         workflow_runner=LocalWorkflowRunner(),
         usage_ledger=UsageLedger(),
         prompt_loader=PromptLoader(Path("prompts")),
+        generator_client=FakeTextGenerationClient(),
     )
 
 

@@ -18,14 +18,21 @@ dataset:
 shared_pipeline:
   segment_tokens: 6000
   segment_overlap_tokens: 250
-  selected_documents: 2
+  selected_documents: 1
   retrieved_segments: 4
 
 systems:
   - flat_vector
+  - stuffing
+  - map_reduce
+  - refine
 
 evaluation:
   local:
+    - map_schema_validity
+    - map_source_reference_validity
+    - map_compression_ratio
+    - map_completion_rate
     - document_recall_at_1
     - document_recall_at_3
     - mrr
@@ -40,4 +47,3 @@ evaluation:
 
 storage:
   artifacts_dir: artifacts
-

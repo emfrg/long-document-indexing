@@ -72,6 +72,9 @@ def _calculate_metric(
 ) -> tuple[float, str] | None:
     truth = item.ground_truth
 
+    if metric_name.startswith("map_"):
+        return None
+
     if metric_name.startswith("document_recall_at_"):
         if not truth.relevant_document_ids:
             return None

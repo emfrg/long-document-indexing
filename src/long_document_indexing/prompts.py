@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
+from string import Template
+from typing import Any
 
 
 class PromptLoader:
@@ -30,3 +33,10 @@ class PromptLoader:
         if not path.exists():
             raise FileNotFoundError(f"prompt file not found: {path}")
         return path
+
+
+def render_prompt(template: str, values: Mapping[str, Any]) -> str:
+    """Render prompt templates using shell-style placeholders such as `${query}`."""
+
+    prepared = {key: str(value) for key, value in values.items()}
+    return Template(template).safe_substitute(prepared)
