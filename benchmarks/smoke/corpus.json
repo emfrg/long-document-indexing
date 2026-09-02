@@ -1,0 +1,65 @@
+{
+  "id": "smoke-corpus",
+  "documents": [
+    {
+      "id": "doc_alpha",
+      "corpus_id": "smoke-corpus",
+      "title": "Alpha Renewal Memo",
+      "segments": [
+        {
+          "id": "alpha_s1",
+          "document_id": "doc_alpha",
+          "order": 1,
+          "text": "The alpha contract renewal was approved by the board on March 3, 2024 after procurement confirmed vendor performance.",
+          "metadata": {
+            "section": "approval"
+          }
+        },
+        {
+          "id": "alpha_s2",
+          "document_id": "doc_alpha",
+          "order": 2,
+          "text": "Finance estimated the renewal would reduce annual support costs by twelve percent compared with the previous agreement.",
+          "metadata": {
+            "section": "finance"
+          }
+        }
+      ],
+      "metadata": {
+        "source_type": "memo"
+      }
+    },
+    {
+      "id": "doc_beta",
+      "corpus_id": "smoke-corpus",
+      "title": "Beta Incident Report",
+      "segments": [
+        {
+          "id": "beta_s1",
+          "document_id": "doc_beta",
+          "order": 1,
+          "text": "The beta incident began with a storage outage at 09:15 and service was restored at 11:40 on April 8, 2024.",
+          "metadata": {
+            "section": "timeline"
+          }
+        },
+        {
+          "id": "beta_s2",
+          "document_id": "doc_beta",
+          "order": 2,
+          "text": "The postmortem assigned remediation to the platform team and required a backup validation drill every quarter.",
+          "metadata": {
+            "section": "remediation"
+          }
+        }
+      ],
+      "metadata": {
+        "source_type": "incident_report"
+      }
+    }
+  ],
+  "metadata": {
+    "purpose": "local smoke test"
+  }
+}
+

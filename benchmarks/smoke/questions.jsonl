@@ -1,0 +1,3 @@
+{"id":"q_alpha_approval","corpus_id":"smoke-corpus","query":"Which document describes the alpha contract renewal approval?","ground_truth":{"expected_answer":"The alpha renewal was approved by the board on March 3, 2024.","relevant_document_ids":["doc_alpha"],"relevant_segment_ids":["alpha_s1"],"evidence":[]},"tags":["source_identification","local_smoke"],"metadata":{}}
+{"id":"q_beta_timeline","corpus_id":"smoke-corpus","query":"When did the beta incident start and end?","ground_truth":{"expected_answer":"The beta incident started at 09:15 and service was restored at 11:40 on April 8, 2024.","relevant_document_ids":["doc_beta"],"relevant_segment_ids":["beta_s1"],"evidence":[]},"tags":["chronology","local_smoke"],"metadata":{}}
+

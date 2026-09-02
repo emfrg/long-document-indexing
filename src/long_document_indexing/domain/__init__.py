@@ -1,0 +1,1 @@
+"""Canonical benchmark domain models."""
