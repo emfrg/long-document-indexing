@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import time
 
 from long_document_indexing.config import SharedPipelineConfig
@@ -9,6 +8,7 @@ from long_document_indexing.domain.corpus import Corpus
 from long_document_indexing.domain.maps import IndexArtifact
 from long_document_indexing.domain.runs import Citation, RagRunRecord, UsageRecord
 from long_document_indexing.services import Services
+from long_document_indexing.telemetry.tracing import stable_query_run_id
 
 
 class FlatVectorSystem:
@@ -63,7 +63,7 @@ class FlatVectorSystem:
         ]
         duration_ms = (time.perf_counter() - started) * 1000.0
         return RagRunRecord(
-            run_id=_run_id(experiment_id, self.id, item.id, repetition),
+            run_id=stable_query_run_id(experiment_id, self.id, item.id, repetition),
             experiment_id=experiment_id,
             system_id=self.id,
             corpus_id=item.corpus_id,
@@ -103,9 +103,3 @@ def _extractive_answer(retrieved_items: list) -> str:
         for item in retrieved_items[:3]
     ]
     return "Local baseline answer from retrieved evidence: " + " ".join(snippets)
-
-
-def _run_id(experiment_id: str, system_id: str, item_id: str, repetition: int) -> str:
-    seed = f"{experiment_id}:{system_id}:{item_id}:{repetition}"
-    digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()
-    return f"run-{digest[:16]}"

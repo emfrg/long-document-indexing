@@ -13,10 +13,15 @@ from long_document_indexing.datasets.registry import create_dataset_adapter
 from long_document_indexing.domain.maps import IndexArtifact
 from long_document_indexing.domain.runs import MetricRecord, RagRunRecord
 from long_document_indexing.evaluation.runner import aggregate_metric_means, evaluate_run
+from long_document_indexing.prompts import PromptLoader
 from long_document_indexing.retrieval.local_vector import LocalVectorBackend
 from long_document_indexing.services import Services
 from long_document_indexing.storage.artifacts import ArtifactStore
 from long_document_indexing.systems.registry import create_system
+from long_document_indexing.telemetry.usage import UsageEvent, UsageLedger
+from long_document_indexing.workflows.common_indexing import run_indexing_workflow
+from long_document_indexing.workflows.common_query import run_query_workflow
+from long_document_indexing.workflows.execution import LocalWorkflowRunner
 
 app = typer.Typer(no_args_is_help=True)
 ConfigPath = Annotated[Path, typer.Option("--config", "-c")]
@@ -95,7 +100,13 @@ async def _index(config: ExperimentConfig) -> None:
         system = create_system(system_id)
         system_artifacts: list[IndexArtifact] = []
         for corpus in loaded.corpora:
-            artifact = await system.build_index(corpus, services, config.shared_pipeline)
+            artifact = await run_indexing_workflow(
+                system=system,
+                corpus=corpus,
+                services=services,
+                pipeline=config.shared_pipeline,
+                experiment_id=config.experiment.id,
+            )
             artifacts.append(artifact)
             system_artifacts.append(artifact)
         services.artifact_store.write_jsonl(
@@ -104,6 +115,7 @@ async def _index(config: ExperimentConfig) -> None:
         )
 
     services.artifact_store.write_jsonl("indexes/index_artifacts.jsonl", artifacts)
+    _write_usage(services, "costs/index-usage.jsonl")
     typer.echo(f"Indexed {len(artifacts)} system/corpus pair(s)")
 
 
@@ -126,18 +138,20 @@ async def _query(config: ExperimentConfig) -> None:
             for item in items:
                 for repetition in range(config.experiment.query_repetitions):
                     records.append(
-                        await system.run_query(
-                            item,
-                            corpus,
-                            artifact,
-                            services,
-                            config.shared_pipeline,
+                        await run_query_workflow(
+                            system=system,
+                            item=item,
+                            corpus=corpus,
+                            index_artifact=artifact,
+                            services=services,
+                            pipeline=config.shared_pipeline,
                             experiment_id=config.experiment.id,
                             repetition=repetition,
                         )
                     )
         services.artifact_store.write_jsonl(f"runs/{system.id}.jsonl", records)
         typer.echo(f"Queried {len(records)} item run(s) for {system.id}")
+    _write_usage(services, "costs/query-usage.jsonl")
 
 
 def _evaluate(config: ExperimentConfig) -> None:
@@ -197,7 +211,13 @@ def _artifact_store(config: ExperimentConfig) -> ArtifactStore:
 def _services(config: ExperimentConfig) -> Services:
     store = _artifact_store(config)
     retrieval_backend = LocalVectorBackend(store.path("indexes", "local_vector"))
-    return Services(artifact_store=store, retrieval_backend=retrieval_backend)
+    return Services(
+        artifact_store=store,
+        retrieval_backend=retrieval_backend,
+        workflow_runner=LocalWorkflowRunner(),
+        usage_ledger=UsageLedger(),
+        prompt_loader=PromptLoader(Path("prompts")),
+    )
 
 
 def _load_index_artifacts(store: ArtifactStore) -> list[IndexArtifact]:
@@ -212,6 +232,11 @@ def _validate_loaded_dataset(loaded: LoadedDataset) -> None:
     missing = [item.id for item in loaded.question_set.items if item.corpus_id not in corpus_ids]
     if missing:
         raise ValueError(f"question items reference unknown corpora: {missing}")
+
+
+def _write_usage(services: Services, relative_path: str) -> None:
+    records: list[UsageEvent] = services.usage_ledger.records
+    services.artifact_store.write_jsonl(relative_path, records)
 
 
 def _markdown_table(rows: list[dict[str, str | float]]) -> str:

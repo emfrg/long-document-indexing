@@ -27,6 +27,8 @@ The smoke run writes artifacts under `artifacts/`, which is ignored by git.
 
 The CLI command uses `--no-editable` because some macOS Python 3.13 environments skip editable-install `.pth` files inside hidden virtualenv directories. Tests still run against `src/` through pytest configuration.
 
-## Current Milestone
+## Current Shape
 
-Milestone 1 establishes the benchmark kernel. It deliberately avoids model calls, Microsoft Agent Framework orchestration, and Foundry evaluation so the core experiment contracts can be tested cheaply and deterministically.
+Milestone 1 established the benchmark kernel. Milestone 2 adds workflow-neutral orchestration, local workflow run records, trace IDs, usage ledgers, prompt loading, and an optional Microsoft Agent Framework adapter boundary.
+
+The concrete smoke path still runs locally. The MAF runner is intentionally a boundary for now; model-backed MAF workflows arrive after the local benchmark contracts are stable.

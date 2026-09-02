@@ -19,6 +19,9 @@ dev = [
 multilexsum = [
     "datasets>=2.20",
 ]
+maf = [
+    "agent-framework-core>=1.16,<2",
+]
 
 [project.scripts]
 ldi = "long_document_indexing.cli:app"
