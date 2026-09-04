@@ -14,7 +14,7 @@ from long_document_indexing.domain.maps import IndexArtifact
 from long_document_indexing.domain.runs import MetricRecord, RagRunRecord
 from long_document_indexing.evaluation.local.maps import evaluate_index_artifact
 from long_document_indexing.evaluation.runner import aggregate_metric_means, evaluate_run
-from long_document_indexing.models.fake import FakeTextGenerationClient
+from long_document_indexing.models.factory import create_text_generation_client
 from long_document_indexing.prompts import PromptLoader
 from long_document_indexing.retrieval.local_vector import LocalVectorBackend
 from long_document_indexing.services import Services
@@ -232,7 +232,7 @@ def _services(config: ExperimentConfig) -> Services:
         workflow_runner=LocalWorkflowRunner(),
         usage_ledger=UsageLedger(),
         prompt_loader=PromptLoader(Path("prompts")),
-        generator_client=FakeTextGenerationClient(),
+        generator_client=create_text_generation_client(config.models),
     )
 
 

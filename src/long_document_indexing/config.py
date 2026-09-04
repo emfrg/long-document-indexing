@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -53,9 +53,39 @@ class DatasetConfig(BaseModel):
 class ModelConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    generator_provider: Literal["fake", "foundry", "openai_compatible"] = "fake"
     generator_deployment: str | None = None
+    generator_base_url: str | None = None
+    generator_api_key_env: str = "AZURE_INFERENCE_CREDENTIAL"
+    generator_auth_mode: Literal["api_key", "azure_default_credential"] = "api_key"
+    generator_azure_scope: str = "https://ai.azure.com/.default"
+    generator_temperature: float = 0.0
+    generator_max_output_tokens: int | None = None
+    generator_timeout_seconds: float = 60.0
+    generator_response_format: Literal["json_object", "text"] = "json_object"
     judge_deployment: str | None = None
     embedding_deployment: str | None = None
+
+    @field_validator("generator_temperature")
+    @classmethod
+    def _temperature_in_supported_range(cls, value: float) -> float:
+        if not 0.0 <= value <= 2.0:
+            raise ValueError("generator_temperature must be between 0 and 2")
+        return value
+
+    @field_validator("generator_max_output_tokens")
+    @classmethod
+    def _max_output_tokens_positive(cls, value: int | None) -> int | None:
+        if value is not None and value < 1:
+            raise ValueError("generator_max_output_tokens must be positive when set")
+        return value
+
+    @field_validator("generator_timeout_seconds")
+    @classmethod
+    def _timeout_positive(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("generator_timeout_seconds must be positive")
+        return value
 
 
 class SharedPipelineConfig(BaseModel):

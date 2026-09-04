@@ -1,0 +1,50 @@
+experiment:
+  id: foundry-stuffing-smoke
+  mode: controlled_ablation
+  seed: 42
+  query_repetitions: 1
+
+dataset:
+  adapter: jsonl
+  corpus_path: benchmarks/smoke/corpus.json
+  question_set: benchmarks/smoke/questions.jsonl
+  capabilities:
+    has_expected_answers: true
+    has_relevant_documents: true
+    has_relevant_segments: true
+    has_evidence_spans: false
+    has_reference_summaries: false
+
+models:
+  generator_provider: foundry
+  generator_base_url: ${FOUNDRY_GENERATOR_BASE_URL}
+  generator_deployment: ${FOUNDRY_GENERATOR_DEPLOYMENT}
+  generator_api_key_env: AZURE_INFERENCE_CREDENTIAL
+  generator_auth_mode: api_key
+  generator_temperature: 0.0
+  generator_response_format: json_object
+
+shared_pipeline:
+  segment_tokens: 6000
+  segment_overlap_tokens: 250
+  selected_documents: 1
+  retrieved_segments: 4
+
+systems:
+  - stuffing
+
+evaluation:
+  local:
+    - map_schema_validity
+    - map_source_reference_validity
+    - map_compression_ratio
+    - map_completion_rate
+    - document_recall_at_1
+    - segment_recall_at_4
+    - citation_precision
+    - query_duration_ms
+    - tool_calls
+  foundry: {}
+
+storage:
+  artifacts_dir: artifacts

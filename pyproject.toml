@@ -22,6 +22,10 @@ multilexsum = [
 maf = [
     "agent-framework-core>=1.16,<2",
 ]
+foundry = [
+    "azure-identity>=1.19",
+    "openai>=1.101",
+]
 
 [project.scripts]
 ldi = "long_document_indexing.cli:app"
