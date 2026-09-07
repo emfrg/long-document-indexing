@@ -1,0 +1,62 @@
+experiment:
+  id: foundry-eval-export-smoke
+  mode: controlled_ablation
+  seed: 42
+  query_repetitions: 1
+
+dataset:
+  adapter: jsonl
+  corpus_path: benchmarks/smoke/corpus.json
+  question_set: benchmarks/smoke/questions.jsonl
+  capabilities:
+    has_expected_answers: true
+    has_relevant_documents: true
+    has_relevant_segments: true
+    has_evidence_spans: false
+    has_reference_summaries: false
+
+models:
+  generator_provider: fake
+  generator_response_format: structured
+
+shared_pipeline:
+  segment_tokens: 6000
+  segment_overlap_tokens: 250
+  selected_documents: 1
+  retrieved_segments: 4
+
+workflow:
+  runner: local
+
+answering:
+  mode: generated
+
+systems:
+  - stuffing
+
+evaluation:
+  local:
+    - map_schema_validity
+    - map_source_reference_validity
+    - map_compression_ratio
+    - map_completion_rate
+    - document_recall_at_1
+    - segment_recall_at_4
+    - citation_precision
+    - citation_recall
+    - invalid_citation_rate
+    - query_duration_ms
+    - tool_calls
+  foundry:
+    enabled: true
+    dataset_path: evaluations/foundry/dataset.jsonl
+    manifest_path: evaluations/foundry/manifest.json
+    evaluation_level: turn
+    evaluators:
+      - groundedness
+      - relevance
+      - retrieval
+      - document_retrieval
+
+storage:
+  artifacts_dir: artifacts

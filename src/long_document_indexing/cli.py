@@ -12,6 +12,10 @@ from long_document_indexing.datasets.base import LoadedDataset
 from long_document_indexing.datasets.registry import create_dataset_adapter
 from long_document_indexing.domain.maps import IndexArtifact
 from long_document_indexing.domain.runs import MetricRecord, RagRunRecord
+from long_document_indexing.evaluation.foundry import (
+    FoundryEvaluationExport,
+    write_foundry_evaluation_export,
+)
 from long_document_indexing.evaluation.local.maps import evaluate_index_artifact
 from long_document_indexing.evaluation.runner import aggregate_metric_means, evaluate_run
 from long_document_indexing.models.factory import create_text_generation_client
@@ -55,6 +59,13 @@ def evaluate(config: ConfigPath) -> None:
     """Calculate deterministic local metrics from run records."""
 
     _evaluate(load_experiment_config(config))
+
+
+@app.command("export-foundry-eval")
+def export_foundry_eval(config: ConfigPath) -> None:
+    """Export run records as a Foundry-ready JSONL evaluation dataset."""
+
+    _export_foundry_eval(load_experiment_config(config))
 
 
 @app.command()
@@ -164,12 +175,14 @@ def _evaluate(config: ExperimentConfig) -> None:
     items_by_id = {item.id: item for item in loaded.question_set.items}
 
     metrics: list[MetricRecord] = []
+    foundry_records: list[RagRunRecord] = []
     artifacts = _load_index_artifacts(store)
     for system_id in config.systems:
         system = create_system(system_id)
         records = [
             RagRunRecord.model_validate(row) for row in store.read_jsonl(f"runs/{system.id}.jsonl")
         ]
+        foundry_records.extend(records)
         for record in records:
             metrics.extend(
                 evaluate_run(
@@ -194,6 +207,13 @@ def _evaluate(config: ExperimentConfig) -> None:
 
     store.write_jsonl("evaluations/local-metrics.jsonl", metrics)
     typer.echo(f"Evaluated {len(metrics)} local metric record(s)")
+    if config.evaluation.foundry.enabled:
+        _export_foundry_eval(
+            config,
+            loaded=loaded,
+            store=store,
+            records=foundry_records,
+        )
 
 
 def _report(config: ExperimentConfig) -> None:
@@ -213,6 +233,31 @@ def _report(config: ExperimentConfig) -> None:
     markdown_path = store.path("report/results.md")
     markdown_path.write_text(_markdown_table(rows), encoding="utf-8")
     typer.echo(f"Wrote report to {markdown_path}")
+
+
+def _export_foundry_eval(
+    config: ExperimentConfig,
+    *,
+    loaded: LoadedDataset | None = None,
+    store: ArtifactStore | None = None,
+    records: list[RagRunRecord] | None = None,
+) -> FoundryEvaluationExport:
+    loaded = loaded or _load_dataset(config)
+    store = store or _artifact_store(config)
+    records = records if records is not None else _load_run_records(config, store)
+    items_by_id = {item.id: item for item in loaded.question_set.items}
+    export = write_foundry_evaluation_export(
+        store=store,
+        records=records,
+        items_by_id=items_by_id,
+        config=config.evaluation.foundry,
+        experiment_id=config.experiment.id,
+    )
+    typer.echo(
+        f"Wrote Foundry evaluation dataset with {export.row_count} row(s) to {export.dataset_path}"
+    )
+    typer.echo(f"Wrote Foundry evaluation manifest to {export.manifest_path}")
+    return export
 
 
 def _load_dataset(config: ExperimentConfig) -> LoadedDataset:
@@ -251,6 +296,18 @@ def _load_index_artifacts(store: ArtifactStore) -> list[IndexArtifact]:
     if not rows:
         raise FileNotFoundError("no index artifacts found; run `ldi index` first")
     return [IndexArtifact.model_validate(row) for row in rows]
+
+
+def _load_run_records(config: ExperimentConfig, store: ArtifactStore) -> list[RagRunRecord]:
+    records: list[RagRunRecord] = []
+    for system_id in config.systems:
+        system = create_system(system_id)
+        records.extend(
+            RagRunRecord.model_validate(row) for row in store.read_jsonl(f"runs/{system.id}.jsonl")
+        )
+    if not records:
+        raise FileNotFoundError("no run records found; run `ldi query` first")
+    return records
 
 
 def _validate_loaded_dataset(loaded: LoadedDataset) -> None:

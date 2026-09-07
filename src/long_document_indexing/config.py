@@ -111,11 +111,47 @@ class AnsweringConfig(BaseModel):
     mode: Literal["extractive", "generated"] = "extractive"
 
 
+class FoundryEvaluationConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    dataset_path: Path = Path("evaluations/foundry/dataset.jsonl")
+    manifest_path: Path = Path("evaluations/foundry/manifest.json")
+    evaluation_level: Literal["turn"] = "turn"
+    evaluators: list[str] = Field(
+        default_factory=lambda: [
+            "groundedness",
+            "relevance",
+            "retrieval",
+            "document_retrieval",
+        ]
+    )
+
+    @field_validator("dataset_path", "manifest_path")
+    @classmethod
+    def _must_be_artifact_relative_path(cls, value: Path) -> Path:
+        if value.is_absolute() or any(part == ".." for part in value.parts):
+            raise ValueError("path must be artifact-relative")
+        if str(value).strip() in {"", "."}:
+            raise ValueError("path must not be blank")
+        return value
+
+    @field_validator("evaluators")
+    @classmethod
+    def _evaluators_must_be_unique_and_non_blank(cls, value: list[str]) -> list[str]:
+        normalized = [item.strip() for item in value]
+        if any(not item for item in normalized):
+            raise ValueError("evaluators must not contain blank values")
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("evaluators must not contain duplicates")
+        return normalized
+
+
 class EvaluationConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     local: list[str] = Field(default_factory=list)
-    foundry: dict[str, Any] = Field(default_factory=dict)
+    foundry: FoundryEvaluationConfig = Field(default_factory=FoundryEvaluationConfig)
 
 
 class StorageConfig(BaseModel):

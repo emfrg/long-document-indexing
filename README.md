@@ -9,7 +9,7 @@ The repository is intentionally benchmark-first:
 3. Run questions through each system.
 4. Persist standardized run records.
 5. Evaluate deterministic retrieval and citation metrics locally.
-6. Add Microsoft Agent Framework and Foundry evaluation behind adapters later.
+6. Export Foundry-ready evaluation datasets behind an adapter.
 
 The first milestone is local-only. It includes the canonical domain model, a JSONL smoke dataset, a simple lexical retrieval backend, a flat-vector-style baseline, and local metrics.
 
@@ -33,7 +33,7 @@ Milestone 1 established the benchmark kernel. Milestone 2 adds workflow-neutral 
 
 Milestone 3 added the first document-map systems: `stuffing`, `map_reduce`, and `refine`. These systems use the shared `TextGenerationClient` interface, with a deterministic fake implementation for local tests and smoke runs.
 
-Milestone 5 added an optional Microsoft Agent Framework functional workflow runner. The concrete default smoke path still runs locally.
+Milestone 5 added an optional Microsoft Agent Framework functional workflow runner. Milestone 8 adds a local Foundry evaluation export adapter. The concrete default smoke path still runs locally.
 
 ## Real Model Client
 
@@ -86,6 +86,29 @@ Run the generated-answer smoke config after configuring the real model `.env` va
 ```bash
 uv run --python 3.13 --extra foundry --no-editable --reinstall-package long-document-indexing ldi run --config configs/experiments/foundry-generated-answer-smoke.yaml
 ```
+
+## Foundry Evaluation Export
+
+Milestone 8 exports benchmark run records into a Foundry-ready JSONL dataset. The export includes the standard single-turn fields `query`, `response`, `context`, and `ground_truth`, plus inspectable metadata for systems, citations, retrieved chunks, selected documents, and document-retrieval labels.
+
+Enable automatic export during `ldi evaluate`:
+
+```yaml
+evaluation:
+  foundry:
+    enabled: true
+    dataset_path: evaluations/foundry/dataset.jsonl
+    manifest_path: evaluations/foundry/manifest.json
+    evaluation_level: turn
+```
+
+You can also export from existing run artifacts:
+
+```bash
+uv run --python 3.13 --no-editable --reinstall-package long-document-indexing ldi export-foundry-eval --config configs/experiments/foundry-eval-export-smoke.yaml
+```
+
+This milestone does not run a cloud evaluation. Use the generated JSONL and manifest when uploading a dataset or configuring a later Foundry SDK/portal evaluation run. Azure login is not required for the local export.
 
 ## MAF Workflow Runner
 
