@@ -21,6 +21,11 @@ class MapReduceSystem(DocumentMapSystemBase):
     id = "map_reduce"
     construction_method = "map_reduce"
 
+    def __init__(self, *, reduce_fan_in: int = REDUCE_FAN_IN) -> None:
+        if reduce_fan_in < 1:
+            raise ValueError("reduce_fan_in must be positive")
+        self.reduce_fan_in = reduce_fan_in
+
     async def build_document_maps(
         self,
         corpus: Corpus,
@@ -49,6 +54,7 @@ class MapReduceSystem(DocumentMapSystemBase):
                 partial_maps=partial_maps,
                 services=services,
                 strategy=self.construction_method,
+                fan_in=self.reduce_fan_in,
             )
             document_maps.append(final_map)
             usage_records.append(reduction_usage)
@@ -67,14 +73,15 @@ async def _reduce_tree(
     partial_maps: list[DocumentMap],
     services: Services,
     strategy: str,
+    fan_in: int,
 ) -> tuple[DocumentMap, UsageRecord]:
     current = partial_maps
     usage_records = []
 
     while len(current) > 1:
         next_level = []
-        for start in range(0, len(current), REDUCE_FAN_IN):
-            chunk = current[start : start + REDUCE_FAN_IN]
+        for start in range(0, len(current), fan_in):
+            chunk = current[start : start + fan_in]
             reduced, usage = await reduce_maps_with_model(
                 document=document,
                 partial_maps=chunk,

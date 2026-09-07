@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from pydantic import ValidationError
 
@@ -9,7 +11,9 @@ from long_document_indexing.config import (
     ExperimentConfig,
     FoundryEvaluationConfig,
     RunControlConfig,
+    SystemConfig,
     WorkflowConfig,
+    load_experiment_config,
 )
 from long_document_indexing.workflows.execution import LocalWorkflowRunner, MafWorkflowRunner
 
@@ -49,6 +53,27 @@ def test_workflow_config_selects_maf_runner_when_available() -> None:
 def test_workflow_config_rejects_unknown_runner() -> None:
     with pytest.raises(ValueError, match="Input should be"):
         WorkflowConfig.model_validate({"runner": "unknown"})
+
+
+def test_load_experiment_config_loads_system_configs() -> None:
+    config = load_experiment_config(
+        Path("configs/experiments/advanced-systems-smoke.yaml"),
+        project_root=Path.cwd(),
+    )
+
+    assert config.system_config_for("flat-vector").indexing_strategy == "raw_segments"
+    assert config.system_config_for("map-reduce").reduce_fan_in == 8
+    assert config.system_config_for("hierarchical-map").hierarchy_branching_factor == 2
+    assert config.system_config_for("outline-then-fill").outline_max_nodes == 8
+    assert config.system_config_for("agentic-map").agent_max_steps == 8
+
+
+def test_system_config_rejects_invalid_advanced_knobs() -> None:
+    with pytest.raises(ValidationError, match="at least 2"):
+        SystemConfig.model_validate({"id": "hierarchical_map", "hierarchy_branching_factor": 0})
+
+    with pytest.raises(ValidationError, match="greater than 0"):
+        SystemConfig.model_validate({"id": "agentic_map", "agent_target_coverage": 0})
 
 
 def test_answering_config_rejects_unknown_mode() -> None:

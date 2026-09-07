@@ -33,13 +33,29 @@ This project is a benchmark-first Python framework for comparing long-document i
 7. Optional Foundry export converts run records into a single-turn evaluation dataset.
 8. Reporting aggregates metrics, run statuses, usage, Foundry export metadata, and managed-evaluation results.
 
+## Implemented System Set
+
+The implemented comparison set is one non-map baseline plus six document-map strategies:
+
+| System | What It Does |
+| --- | --- |
+| `flat_vector` | Indexes raw source segments and retrieves directly from them. |
+| `stuffing` | Builds one document map from the whole document when it fits the configured context budget. |
+| `map_reduce` | Builds segment-level maps, then merges them through a bounded fan-in reduction. |
+| `refine` | Builds a document map by revising it sequentially over ordered segments. |
+| `hierarchical_map` | Builds leaf maps for segment groups, then reduces them through a bounded hierarchy. |
+| `outline_then_fill` | Generates an outline plan, fills each outline node from assigned source segments, then assembles the final map. |
+| `agentic_map` | Runs a bounded inspect-and-revise loop that records selected segments, coverage, and intermediate map states. |
+
+All six map-producing systems inherit the same final query path: route over document maps, retrieve source segments from the local vector backend, then answer from retrieved evidence.
+
 ## Directory Guide
 
 `src/long_document_indexing/domain/` contains the benchmark schemas. These objects define corpora, questions, maps, run records, metric records, and usage records.
 
 `src/long_document_indexing/datasets/` adapts benchmark assets into the domain model. The local JSON/JSONL adapter is the default path; `multilexsum` is optional for later external dataset work.
 
-`src/long_document_indexing/systems/` contains the indexing strategies under comparison. `flat_vector` is the non-map baseline, while `stuffing`, `map_reduce`, and `refine` use document maps.
+`src/long_document_indexing/systems/` contains the indexing strategies under comparison. `flat_vector` is the non-map baseline, while `stuffing`, `map_reduce`, `refine`, `hierarchical_map`, `outline_then_fill`, and `agentic_map` use document maps.
 
 `src/long_document_indexing/workflows/` defines the execution boundary. The local runner and MAF runner both expose the same workflow result shape, so benchmark behavior does not depend on the workflow backend.
 
@@ -69,6 +85,18 @@ Run the deterministic enterprise benchmark:
 
 ```bash
 uv run --python 3.13 --no-editable --reinstall-package long-document-indexing ldi run --config configs/experiments/enterprise-thin-slice.yaml
+```
+
+Run all implemented systems on the deterministic smoke benchmark:
+
+```bash
+uv run --python 3.13 --no-editable --reinstall-package long-document-indexing ldi run --config configs/experiments/advanced-systems-smoke.yaml
+```
+
+Run all implemented systems on the deterministic enterprise benchmark:
+
+```bash
+uv run --python 3.13 --no-editable --reinstall-package long-document-indexing ldi run --config configs/experiments/enterprise-advanced-thin-slice.yaml
 ```
 
 Preview budget state before a live run:
@@ -129,4 +157,4 @@ Add a new report field by extending the typed report bundle in `reporting.py` an
 
 ## Final State
 
-The repo is now ready for structured inspection milestone by milestone. The tracked source defines the reusable benchmark framework. Ignored artifacts preserve local run evidence without polluting git history.
+The repo is now ready for structured inspection. The tracked source defines the reusable benchmark framework, and the implemented system set covers a flat-vector baseline plus six document-map strategies. Ignored artifacts preserve local run evidence without polluting git history.

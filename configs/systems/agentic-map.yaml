@@ -1,0 +1,7 @@
+system:
+  id: agentic_map
+  type: native
+  indexing_strategy: agentic_map
+  retrieval_backend: local_vector
+  agent_max_steps: 8
+  agent_target_coverage: 1.0

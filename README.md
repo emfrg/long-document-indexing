@@ -66,6 +66,32 @@ The real-model path is optional. Foundry/Azure OpenAI inference is isolated behi
 
 The Foundry evaluation path is split deliberately. Local export writes JSONL datasets under ignored `artifacts/`; managed evaluation uses the Azure AI Evaluation SDK when requested. Logging managed results to a Foundry project requires a project endpoint and may require `az login`. `azd` is only needed for provisioning or hosted-agent workflows.
 
+## Implemented Systems
+
+The repo now has seven comparable systems:
+
+| System | Config id | Role |
+| --- | --- | --- |
+| Flat vector baseline | `flat_vector` | Raw segment retrieval without document maps. |
+| Stuffing map | `stuffing` | One map from the full document when it fits the context budget. |
+| Map-reduce map | `map_reduce` | Segment maps reduced into one document map. |
+| Refine map | `refine` | Sequential map revision over ordered segments. |
+| Hierarchical map | `hierarchical_map` | Leaf maps reduced through a bounded hierarchy. |
+| Outline-then-fill map | `outline_then_fill` | Plan an outline, then fill outline nodes from source segments. |
+| Agentic map | `agentic_map` | Bounded inspect-and-revise loop with coverage metadata. |
+
+Run all seven on the local smoke fixture:
+
+```bash
+uv run --python 3.13 --no-editable --reinstall-package long-document-indexing ldi run --config configs/experiments/advanced-systems-smoke.yaml
+```
+
+Run all seven on the synthetic enterprise fixture:
+
+```bash
+uv run --python 3.13 --no-editable --reinstall-package long-document-indexing ldi run --config configs/experiments/enterprise-advanced-thin-slice.yaml
+```
+
 ## Real Model Client
 
 Milestone 4 adds a thin OpenAI-compatible client for Microsoft Foundry/Azure OpenAI inference endpoints. Milestone 6 adds a Responses API path with Pydantic-backed structured outputs for GPT-5-family deployments. The real client is optional; the default smoke test still uses `generator_provider: fake`.

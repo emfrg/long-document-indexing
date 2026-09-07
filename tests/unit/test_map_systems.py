@@ -10,7 +10,10 @@ from long_document_indexing.prompts import PromptLoader
 from long_document_indexing.retrieval.local_vector import LocalVectorBackend
 from long_document_indexing.services import Services
 from long_document_indexing.storage.artifacts import ArtifactStore
+from long_document_indexing.systems.agentic_map import AgenticMapSystem
+from long_document_indexing.systems.hierarchical_map import HierarchicalMapSystem
 from long_document_indexing.systems.map_reduce import MapReduceSystem
+from long_document_indexing.systems.outline_then_fill import OutlineThenFillSystem
 from long_document_indexing.systems.refine import RefineSystem
 from long_document_indexing.systems.stuffing import StuffingSystem
 from long_document_indexing.telemetry.usage import UsageLedger
@@ -33,7 +36,14 @@ async def test_map_systems_build_maps_and_answer_queries(tmp_path) -> None:
     services = _services(tmp_path)
     pipeline = SharedPipelineConfig(selected_documents=1, retrieved_segments=2)
 
-    for system in [StuffingSystem(), MapReduceSystem(), RefineSystem()]:
+    for system in [
+        StuffingSystem(),
+        MapReduceSystem(),
+        RefineSystem(),
+        HierarchicalMapSystem(branching_factor=2),
+        OutlineThenFillSystem(),
+        AgenticMapSystem(),
+    ]:
         artifact = await run_indexing_workflow(
             system=system,
             corpus=corpus,
@@ -55,6 +65,31 @@ async def test_map_systems_build_maps_and_answer_queries(tmp_path) -> None:
         assert len(artifact.document_map_ids) == 2
         assert record.selected_document_ids == ["doc_alpha"]
         assert record.retrieved_items[0].segment_id == "alpha_s1"
+
+
+async def test_advanced_map_systems_record_strategy_metadata(tmp_path) -> None:
+    corpus = _corpus()
+    services = _services(tmp_path)
+    pipeline = SharedPipelineConfig(selected_documents=1, retrieved_segments=2)
+
+    systems = [
+        HierarchicalMapSystem(branching_factor=2),
+        OutlineThenFillSystem(),
+        AgenticMapSystem(),
+    ]
+
+    for system in systems:
+        artifact = await run_indexing_workflow(
+            system=system,
+            corpus=corpus,
+            services=services,
+            pipeline=pipeline,
+            experiment_id="exp",
+        )
+
+        assert len(artifact.document_map_ids) == 2
+        assert artifact.build_metadata["intermediate_map_paths"]
+        assert artifact.build_metadata["strategy_metadata"]["documents"]
 
 
 async def test_stuffing_marks_context_overflow(tmp_path) -> None:

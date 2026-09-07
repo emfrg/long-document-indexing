@@ -99,6 +99,66 @@ class SharedPipelineConfig(BaseModel):
     retrieved_segments: int = 12
 
 
+class SystemConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    type: Literal["native", "external"] = "native"
+    indexing_strategy: str | None = None
+    retrieval_backend: str = "local_vector"
+    overflow_policy: str | None = None
+    segment_order: str | None = None
+    reduce_fan_in: int = 8
+    hierarchy_branching_factor: int = 4
+    hierarchy_max_levels: int = 3
+    outline_depth: int = 2
+    outline_max_nodes: int = 12
+    agent_max_steps: int = 8
+    agent_target_coverage: float = 1.0
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("id", "type", "retrieval_backend")
+    @classmethod
+    def _strings_must_not_be_blank(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("value must not be blank")
+        return value
+
+    @field_validator("indexing_strategy", "overflow_policy", "segment_order")
+    @classmethod
+    def _optional_strings_must_not_be_blank(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("value must not be blank")
+        return value
+
+    @field_validator(
+        "reduce_fan_in",
+        "hierarchy_max_levels",
+        "outline_depth",
+        "outline_max_nodes",
+        "agent_max_steps",
+    )
+    @classmethod
+    def _positive_integer_knobs(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("system integer knobs must be positive")
+        return value
+
+    @field_validator("hierarchy_branching_factor")
+    @classmethod
+    def _hierarchy_branching_factor_at_least_two(cls, value: int) -> int:
+        if value < 2:
+            raise ValueError("hierarchy_branching_factor must be at least 2")
+        return value
+
+    @field_validator("agent_target_coverage")
+    @classmethod
+    def _coverage_in_range(cls, value: float) -> float:
+        if not 0.0 < value <= 1.0:
+            raise ValueError("agent_target_coverage must be greater than 0 and at most 1")
+        return value
+
+
 class WorkflowConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -249,6 +309,7 @@ class ExperimentConfig(BaseModel):
     answering: AnsweringConfig = Field(default_factory=AnsweringConfig)
     run_control: RunControlConfig = Field(default_factory=RunControlConfig)
     systems: list[str]
+    system_configs: dict[str, SystemConfig] = Field(default_factory=dict)
     evaluation: EvaluationConfig = Field(default_factory=EvaluationConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)
 
@@ -260,6 +321,18 @@ class ExperimentConfig(BaseModel):
             raise ValueError("systems list contains duplicates")
         return self
 
+    @model_validator(mode="after")
+    def _validate_system_configs(self) -> ExperimentConfig:
+        for key, value in self.system_configs.items():
+            normalized_key = normalize_system_id(key)
+            normalized_id = normalize_system_id(value.id)
+            if normalized_key != normalized_id:
+                raise ValueError(
+                    "system_configs keys must match nested system config ids: "
+                    f"{key!r} != {value.id!r}"
+                )
+        return self
+
     def resolve_paths(self, project_root: Path) -> ExperimentConfig:
         return self.model_copy(
             update={
@@ -267,6 +340,13 @@ class ExperimentConfig(BaseModel):
                 "storage": self.storage.resolve_paths(project_root),
             }
         )
+
+    def system_config_for(self, system_id: str) -> SystemConfig:
+        normalized = normalize_system_id(system_id)
+        for key, config in self.system_configs.items():
+            if normalize_system_id(key) == normalized:
+                return config
+        return SystemConfig(id=normalized, indexing_strategy=normalized)
 
 
 def load_experiment_config(path: Path, project_root: Path | None = None) -> ExperimentConfig:
@@ -277,7 +357,12 @@ def load_experiment_config(path: Path, project_root: Path | None = None) -> Expe
         raise ValueError(f"empty config file: {path}")
 
     expanded = _expand_env(raw)
-    return ExperimentConfig.model_validate(expanded).resolve_paths(project_root)
+    config = ExperimentConfig.model_validate(expanded).resolve_paths(project_root)
+    return _with_loaded_system_configs(config, project_root)
+
+
+def normalize_system_id(system_id: str) -> str:
+    return system_id.strip().replace("-", "_").lower()
 
 
 def _expand_env(value: Any) -> Any:
@@ -321,3 +406,67 @@ def _load_local_env(path: Path) -> None:
         if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
             value = value[1:-1]
         os.environ.setdefault(name, value)
+
+
+def _with_loaded_system_configs(
+    config: ExperimentConfig,
+    project_root: Path,
+) -> ExperimentConfig:
+    loaded_configs: dict[str, SystemConfig] = {}
+    for system_id in config.systems:
+        normalized = normalize_system_id(system_id)
+        loaded_configs[normalized] = _load_system_config(
+            normalized,
+            project_root=project_root,
+            override=_system_config_override(config.system_configs, normalized),
+        )
+    return config.model_copy(update={"system_configs": loaded_configs})
+
+
+def _load_system_config(
+    system_id: str,
+    *,
+    project_root: Path,
+    override: SystemConfig | None = None,
+) -> SystemConfig:
+    payload: dict[str, Any] = {
+        "id": system_id,
+        "indexing_strategy": system_id,
+    }
+    config_path = _system_config_path(project_root, system_id)
+    if config_path is not None:
+        raw = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
+        if not isinstance(raw, dict):
+            raise ValueError(f"system config must be a mapping: {config_path}")
+        raw_system = raw.get("system", raw)
+        if not isinstance(raw_system, dict):
+            raise ValueError(f"system config 'system' must be a mapping: {config_path}")
+        payload.update(_expand_env(raw_system))
+
+    if override is not None:
+        payload.update(override.model_dump(mode="json"))
+
+    payload["id"] = normalize_system_id(str(payload["id"]))
+    return SystemConfig.model_validate(payload)
+
+
+def _system_config_path(project_root: Path, system_id: str) -> Path | None:
+    system_dir = project_root / "configs" / "systems"
+    candidates = [
+        system_dir / f"{system_id}.yaml",
+        system_dir / f"{system_id.replace('_', '-')}.yaml",
+    ]
+    for path in candidates:
+        if path.exists():
+            return path
+    return None
+
+
+def _system_config_override(
+    system_configs: dict[str, SystemConfig],
+    system_id: str,
+) -> SystemConfig | None:
+    for key, config in system_configs.items():
+        if normalize_system_id(key) == system_id:
+            return config
+    return None

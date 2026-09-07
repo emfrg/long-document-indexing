@@ -61,6 +61,29 @@ def test_enterprise_thin_slice_local_config_is_all_system_and_export_enabled() -
     assert config.evaluation.foundry.enabled is True
 
 
+def test_enterprise_advanced_thin_slice_config_lists_all_implemented_systems() -> None:
+    config = load_experiment_config(
+        Path("configs/experiments/enterprise-advanced-thin-slice.yaml"),
+        project_root=Path.cwd(),
+    )
+
+    assert config.models.generator_provider == "fake"
+    assert config.answering.mode == "generated"
+    assert config.systems == [
+        "flat_vector",
+        "stuffing",
+        "map_reduce",
+        "refine",
+        "hierarchical_map",
+        "outline_then_fill",
+        "agentic_map",
+    ]
+    assert config.system_config_for("hierarchical_map").hierarchy_branching_factor == 2
+    assert config.system_config_for("outline_then_fill").outline_depth == 2
+    assert config.system_config_for("agentic_map").agent_target_coverage == 1.0
+    assert config.evaluation.foundry.enabled is True
+
+
 def test_foundry_enterprise_stuffing_config_caps_live_thin_slice_scope(monkeypatch) -> None:
     monkeypatch.setenv(
         "FOUNDRY_GENERATOR_BASE_URL",

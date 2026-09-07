@@ -243,6 +243,10 @@ def _prepare(config: ExperimentConfig) -> None:
             "experiment": config.experiment.model_dump(mode="json"),
             "dataset": config.dataset.model_dump(mode="json"),
             "systems": config.systems,
+            "system_configs": {
+                system_id: config.system_config_for(system_id).model_dump(mode="json")
+                for system_id in config.systems
+            },
             "answering": config.answering.model_dump(mode="json"),
             "run_control": config.run_control.model_dump(mode="json"),
             "corpus_ids": [corpus.id for corpus in loaded.corpora],
@@ -280,7 +284,7 @@ async def _index(
     reused = 0
 
     for system_id in config.systems:
-        system = create_system(system_id)
+        system = _create_system(config, system_id)
         for corpus in loaded.corpora:
             key = (system.id, corpus.id)
             if key in artifacts_by_key:
@@ -337,7 +341,7 @@ async def _query(
     corpora_by_id = {corpus.id: corpus for corpus in loaded.corpora}
 
     for system_id in config.systems:
-        system = create_system(system_id)
+        system = _create_system(config, system_id)
         records_by_run_id: dict[str, RagRunRecord] = (
             {
                 record.run_id: record
@@ -436,7 +440,7 @@ def _evaluate(config: ExperimentConfig) -> None:
     foundry_records: list[RagRunRecord] = []
     artifacts = _load_index_artifacts(store)
     for system_id in config.systems:
-        system = create_system(system_id)
+        system = _create_system(config, system_id)
         records = [
             RagRunRecord.model_validate(row) for row in store.read_jsonl(f"runs/{system.id}.jsonl")
         ]
@@ -637,6 +641,10 @@ def _workflow_runner(config: ExperimentConfig):
     raise ValueError(f"unsupported workflow runner: {config.workflow.runner}")
 
 
+def _create_system(config: ExperimentConfig, system_id: str):
+    return create_system(system_id, config.system_config_for(system_id))
+
+
 def _load_index_artifacts(store: ArtifactStore) -> list[IndexArtifact]:
     rows = store.read_jsonl("indexes/index_artifacts.jsonl")
     if not rows:
@@ -670,7 +678,7 @@ def _write_index_artifacts(
 ) -> list[IndexArtifact]:
     ordered_artifacts = _ordered_index_artifacts(config, loaded, artifacts_by_key)
     for system_id in config.systems:
-        system = create_system(system_id)
+        system = _create_system(config, system_id)
         store.write_jsonl(
             f"indexes/{system.id}/index_artifacts.jsonl",
             [artifact for artifact in ordered_artifacts if artifact.system_id == system.id],
@@ -686,7 +694,7 @@ def _ordered_index_artifacts(
 ) -> list[IndexArtifact]:
     ordered = []
     for system_id in config.systems:
-        system = create_system(system_id)
+        system = _create_system(config, system_id)
         for corpus in loaded.corpora:
             artifact = artifacts_by_key.get((system.id, corpus.id))
             if artifact is not None:
@@ -717,7 +725,7 @@ def _usage_from_index_artifact(artifact: IndexArtifact) -> UsageRecord:
 def _load_run_records(config: ExperimentConfig, store: ArtifactStore) -> list[RagRunRecord]:
     records: list[RagRunRecord] = []
     for system_id in config.systems:
-        system = create_system(system_id)
+        system = _create_system(config, system_id)
         records.extend(
             RagRunRecord.model_validate(row) for row in store.read_jsonl(f"runs/{system.id}.jsonl")
         )
@@ -736,7 +744,7 @@ def _load_run_records_from_dir(
 ) -> list[RagRunRecord]:
     records: list[RagRunRecord] = []
     for system_id in config.systems:
-        system = create_system(system_id)
+        system = _create_system(config, system_id)
         path = experiment_dir / f"runs/{system.id}.jsonl"
         if not path.exists():
             continue
@@ -792,7 +800,7 @@ def _load_run_records_for_report(
 ) -> list[RagRunRecord]:
     records: list[RagRunRecord] = []
     for system_id in config.systems:
-        system = create_system(system_id)
+        system = _create_system(config, system_id)
         records.extend(
             RagRunRecord.model_validate(row) for row in store.read_jsonl(f"runs/{system.id}.jsonl")
         )

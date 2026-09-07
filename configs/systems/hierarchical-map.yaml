@@ -1,0 +1,7 @@
+system:
+  id: hierarchical_map
+  type: native
+  indexing_strategy: hierarchical_map
+  retrieval_backend: local_vector
+  hierarchy_branching_factor: 2
+  hierarchy_max_levels: 3

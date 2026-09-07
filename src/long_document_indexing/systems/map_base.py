@@ -29,6 +29,8 @@ class MapBuildResult:
     document_maps: list[DocumentMap]
     usage: UsageRecord = field(default_factory=UsageRecord)
     statuses: dict[str, str] = field(default_factory=dict)
+    intermediate_maps: dict[str, DocumentMap] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class DocumentMapSystemBase(ABC):
@@ -56,6 +58,14 @@ class DocumentMapSystemBase(ABC):
             )
             document_map_paths[map_id] = str(path)
 
+        intermediate_map_paths: dict[str, str] = {}
+        for map_id, document_map in result.intermediate_maps.items():
+            path = services.artifact_store.write_json(
+                f"indexes/{self.id}/intermediate_maps/{map_id}.json",
+                document_map,
+            )
+            intermediate_map_paths[map_id] = str(path)
+
         artifact_id = stable_id("index", self.id, corpus.id, retrieval_index_id)
         build_metadata: dict[str, Any] = {
             "retrieval_index_id": retrieval_index_id,
@@ -64,6 +74,10 @@ class DocumentMapSystemBase(ABC):
             "document_statuses": result.statuses,
             "usage": result.usage.model_dump(mode="json"),
         }
+        if intermediate_map_paths:
+            build_metadata["intermediate_map_paths"] = intermediate_map_paths
+        if result.metadata:
+            build_metadata["strategy_metadata"] = result.metadata
         artifact = IndexArtifact(
             id=artifact_id,
             system_id=self.id,
@@ -151,13 +165,16 @@ class DocumentMapSystemBase(ABC):
         template = services.prompt_loader.load(*prompt_parts)
         prompt = render_prompt(
             template,
-            {
-                "document_id": document.id,
-                "title": document.title or document.id,
-                "construction_method": self.construction_method,
-                "segment_count": len(segments),
-                "segments": _segments_for_prompt(segments),
-            },
+            _prompt_values(
+                {
+                    "document_id": document.id,
+                    "title": document.title or document.id,
+                    "construction_method": self.construction_method,
+                    "segment_count": len(segments),
+                    "segments": _segments_for_prompt(segments),
+                },
+                extra_metadata,
+            ),
         )
         response = await client.generate(
             GenerationRequest(
@@ -215,6 +232,19 @@ def _segments_for_prompt(segments: list[Segment]) -> str:
         f"[{segment.id}]\n{segment.text}"
         for segment in sorted(segments, key=lambda item: item.order)
     )
+
+
+def _prompt_values(
+    base: dict[str, Any],
+    extra_metadata: dict[str, Any] | None,
+) -> dict[str, Any]:
+    values = dict(base)
+    for key, value in (extra_metadata or {}).items():
+        if isinstance(value, str | int | float | bool) or value is None:
+            values[key] = "" if value is None else value
+        else:
+            values[key] = json.dumps(value, indent=2, sort_keys=True)
+    return values
 
 
 def _load_document_maps(index_artifact: IndexArtifact) -> list[DocumentMap]:
