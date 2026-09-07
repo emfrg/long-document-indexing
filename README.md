@@ -110,6 +110,18 @@ uv run --python 3.13 --no-editable --reinstall-package long-document-indexing ld
 
 This milestone does not run a cloud evaluation. Use the generated JSONL and manifest when uploading a dataset or configuring a later Foundry SDK/portal evaluation run. Azure login is not required for the local export.
 
+## Multi-System Real Benchmark
+
+Milestone 9 runs the real GPT-5-family generator across all implemented systems on the smoke corpus:
+
+```bash
+uv run --python 3.13 --extra foundry --no-editable --reinstall-package long-document-indexing ldi run --config configs/experiments/foundry-multi-system-real-smoke.yaml
+```
+
+This config compares `flat_vector`, `stuffing`, `map_reduce`, and `refine` with `answering.mode: generated` and Foundry evaluation export enabled. On the bundled smoke corpus, it performs 12 document-map generation calls and 8 generated-answer calls. The run writes local metrics, usage JSONL files, a Markdown/CSV report, and a Foundry-ready evaluation dataset under `artifacts/foundry-multi-system-real-smoke/`.
+
+Azure login is not required for this API-key based run. Configure `FOUNDRY_GENERATOR_BASE_URL`, `FOUNDRY_GENERATOR_DEPLOYMENT`, and `AZURE_INFERENCE_CREDENTIAL` before running it.
+
 ## MAF Workflow Runner
 
 Milestone 5 adds an optional Microsoft Agent Framework functional workflow runner. It does not require Azure resources when used with the fake generator.

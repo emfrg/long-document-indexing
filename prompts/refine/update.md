@@ -6,6 +6,7 @@ Construction method: `${construction_method}`
 Keep useful existing entries, add important new information, and preserve source segment identifiers.
 
 Use the normalized DocumentMap schema.
+Keep the updated map compact: merge overlapping entries, prefer 1-4 useful entries, concise summaries, and source references instead of copied passages.
 
 Existing map:
 

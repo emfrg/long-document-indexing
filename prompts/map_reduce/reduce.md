@@ -6,6 +6,7 @@ Construction method: `${construction_method}`
 Do not invent source references. Preserve the source references already present in the partial maps.
 
 Use the normalized DocumentMap schema.
+Keep the reduced map compact: merge overlapping entries, prefer 1-4 useful entries, concise summaries, and source references instead of copied passages.
 
 Partial maps:
 

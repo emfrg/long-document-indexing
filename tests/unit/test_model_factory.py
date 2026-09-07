@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from long_document_indexing.config import ModelConfig, load_experiment_config
@@ -112,3 +114,30 @@ systems:
     assert config.models.generator_deployment == "gpt-5-mini-doc-map-generator"
     assert config.models.generator_response_format == "structured"
     assert create_text_generation_client(config.models).base_url.endswith("/openai/v1/")
+
+
+def test_foundry_multi_system_real_smoke_config_shape(monkeypatch) -> None:
+    monkeypatch.setenv(
+        "FOUNDRY_GENERATOR_BASE_URL",
+        "https://example.services.ai.azure.com/openai/v1/responses",
+    )
+    monkeypatch.setenv("FOUNDRY_GENERATOR_DEPLOYMENT", "gpt-5-mini-doc-map-generator")
+    monkeypatch.setenv("FOUNDRY_GENERATOR_API", "responses")
+    monkeypatch.setenv("FOUNDRY_GENERATOR_MAX_OUTPUT_TOKENS", "6000")
+    monkeypatch.setenv("FOUNDRY_GENERATOR_RESPONSE_FORMAT", "structured")
+    monkeypatch.setenv("AZURE_INFERENCE_CREDENTIAL", "test-key")
+
+    config = load_experiment_config(
+        Path("configs/experiments/foundry-multi-system-real-smoke.yaml"),
+        project_root=Path.cwd(),
+    )
+
+    assert config.experiment.id == "foundry-multi-system-real-smoke"
+    assert config.models.generator_provider == "foundry"
+    assert config.models.generator_api == "responses"
+    assert config.models.generator_max_output_tokens == 6000
+    assert config.models.generator_response_format == "structured"
+    assert config.answering.mode == "generated"
+    assert config.systems == ["flat_vector", "stuffing", "map_reduce", "refine"]
+    assert config.evaluation.foundry.enabled is True
+    assert config.evaluation.foundry.evaluation_level == "turn"
