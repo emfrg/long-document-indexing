@@ -1,10 +1,19 @@
 from __future__ import annotations
 
-from long_document_indexing.models.structured_outputs import StructuredDocumentMap
+from long_document_indexing.models.structured_outputs import (
+    StructuredDocumentMap,
+    StructuredGeneratedAnswer,
+)
 
 
 def test_structured_document_map_schema_uses_closed_objects() -> None:
     schema = StructuredDocumentMap.model_json_schema()
+
+    assert _object_paths_with_open_properties(schema) == []
+
+
+def test_structured_generated_answer_schema_uses_closed_objects() -> None:
+    schema = StructuredGeneratedAnswer.model_json_schema()
 
     assert _object_paths_with_open_properties(schema) == []
 

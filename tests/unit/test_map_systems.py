@@ -74,7 +74,46 @@ async def test_stuffing_marks_context_overflow(tmp_path) -> None:
     assert set(artifact.build_metadata["document_statuses"].values()) == {"context_overflow"}
 
 
-def _services(tmp_path) -> Services:
+async def test_mapped_query_can_generate_model_backed_answer(tmp_path) -> None:
+    corpus = _corpus()
+    item = BenchmarkItem(
+        id="q_alpha",
+        corpus_id=corpus.id,
+        query="alpha board approval",
+        ground_truth=GroundTruth(
+            relevant_document_ids={"doc_alpha"},
+            relevant_segment_ids={"alpha_s1"},
+        ),
+    )
+    services = _services(tmp_path, answering_mode="generated")
+    system = StuffingSystem()
+
+    artifact = await run_indexing_workflow(
+        system=system,
+        corpus=corpus,
+        services=services,
+        pipeline=SharedPipelineConfig(selected_documents=1, retrieved_segments=2),
+        experiment_id="exp",
+    )
+    record = await run_query_workflow(
+        system=system,
+        item=item,
+        corpus=corpus,
+        index_artifact=artifact,
+        services=services,
+        pipeline=SharedPipelineConfig(selected_documents=1, retrieved_segments=2),
+        experiment_id="exp",
+        repetition=0,
+    )
+
+    assert record.answer.startswith("Fake generated answer")
+    assert record.usage.model_calls == 1
+    assert {citation.segment_id for citation in record.citations} <= {
+        retrieved.segment_id for retrieved in record.retrieved_items
+    }
+
+
+def _services(tmp_path, *, answering_mode: str = "extractive") -> Services:
     store = ArtifactStore(tmp_path / "artifacts", "exp")
     return Services(
         artifact_store=store,
@@ -82,6 +121,7 @@ def _services(tmp_path) -> Services:
         workflow_runner=LocalWorkflowRunner(),
         usage_ledger=UsageLedger(),
         prompt_loader=PromptLoader(Path("prompts")),
+        answering_mode=answering_mode,
         generator_client=FakeTextGenerationClient(),
     )
 

@@ -86,6 +86,7 @@ def _prepare(config: ExperimentConfig) -> None:
             "experiment": config.experiment.model_dump(mode="json"),
             "dataset": config.dataset.model_dump(mode="json"),
             "systems": config.systems,
+            "answering": config.answering.model_dump(mode="json"),
             "corpus_ids": [corpus.id for corpus in loaded.corpora],
             "question_count": len(loaded.question_set.items),
         },
@@ -232,6 +233,7 @@ def _services(config: ExperimentConfig) -> Services:
         workflow_runner=_workflow_runner(config),
         usage_ledger=UsageLedger(),
         prompt_loader=PromptLoader(Path("prompts")),
+        answering_mode=config.answering.mode,
         generator_client=create_text_generation_client(config.models),
     )
 

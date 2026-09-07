@@ -68,6 +68,25 @@ Then run the real-client stuffing smoke config:
 uv run --python 3.13 --extra foundry --no-editable --reinstall-package long-document-indexing ldi run --config configs/experiments/foundry-stuffing-smoke.yaml
 ```
 
+## Answer Generation
+
+The default query path is extractive: it builds answers by stitching retrieved source snippets. This keeps local smoke tests deterministic.
+
+Milestone 7 adds optional model-backed answer generation:
+
+```yaml
+answering:
+  mode: generated
+```
+
+Generated answers use the same `TextGenerationClient` and Pydantic structured-output flow as document-map generation. The model returns answer text plus citations, and the repo validates that every citation points to retrieved evidence.
+
+Run the generated-answer smoke config after configuring the real model `.env` values:
+
+```bash
+uv run --python 3.13 --extra foundry --no-editable --reinstall-package long-document-indexing ldi run --config configs/experiments/foundry-generated-answer-smoke.yaml
+```
+
 ## MAF Workflow Runner
 
 Milestone 5 adds an optional Microsoft Agent Framework functional workflow runner. It does not require Azure resources when used with the fake generator.

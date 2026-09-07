@@ -105,6 +105,12 @@ class WorkflowConfig(BaseModel):
     runner: Literal["local", "maf"] = "local"
 
 
+class AnsweringConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    mode: Literal["extractive", "generated"] = "extractive"
+
+
 class EvaluationConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -133,6 +139,7 @@ class ExperimentConfig(BaseModel):
     models: ModelConfig = Field(default_factory=ModelConfig)
     shared_pipeline: SharedPipelineConfig = Field(default_factory=SharedPipelineConfig)
     workflow: WorkflowConfig = Field(default_factory=WorkflowConfig)
+    answering: AnsweringConfig = Field(default_factory=AnsweringConfig)
     systems: list[str]
     evaluation: EvaluationConfig = Field(default_factory=EvaluationConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)

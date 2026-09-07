@@ -6,11 +6,12 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
 
+from long_document_indexing.answering import answer_from_retrieved_evidence, query_usage
 from long_document_indexing.config import SharedPipelineConfig
 from long_document_indexing.domain.benchmark import BenchmarkItem
 from long_document_indexing.domain.corpus import Corpus, Document, Segment
 from long_document_indexing.domain.maps import DocumentMap, IndexArtifact
-from long_document_indexing.domain.runs import Citation, RagRunRecord, UsageRecord
+from long_document_indexing.domain.runs import RagRunRecord, UsageRecord
 from long_document_indexing.models.base import GenerationRequest, GenerationResponse
 from long_document_indexing.models.structured_outputs import StructuredDocumentMap
 from long_document_indexing.prompts import render_prompt
@@ -20,7 +21,6 @@ from long_document_indexing.telemetry.tracing import stable_id, stable_query_run
 from long_document_indexing.text import (
     approximate_token_count,
     lexical_similarity,
-    summarize_text,
 )
 
 
@@ -103,14 +103,12 @@ class DocumentMapSystemBase(ABC):
             document_ids=selected_document_ids,
             top_k=pipeline.retrieved_segments,
         )
-        citations = [
-            Citation(
-                document_id=retrieved.document_id,
-                segment_id=retrieved.segment_id,
-                quote=summarize_text(retrieved.text, max_chars=240),
-            )
-            for retrieved in retrieved_items
-        ]
+        answer_result = await answer_from_retrieved_evidence(
+            item=item,
+            retrieved_items=retrieved_items,
+            services=services,
+            extractive_prefix="Local mapped-system answer from retrieved evidence",
+        )
         duration_ms = (time.perf_counter() - started) * 1000.0
         return RagRunRecord(
             run_id=stable_query_run_id(experiment_id, self.id, item.id, repetition),
@@ -121,9 +119,13 @@ class DocumentMapSystemBase(ABC):
             repetition=repetition,
             selected_document_ids=selected_document_ids,
             retrieved_items=retrieved_items,
-            answer=_extractive_answer(retrieved_items),
-            citations=citations,
-            usage=UsageRecord(tool_calls=2, duration_ms=duration_ms),
+            answer=answer_result.answer,
+            citations=answer_result.citations,
+            usage=query_usage(
+                answer_result.usage,
+                tool_calls=2,
+                duration_ms=duration_ms,
+            ),
             status="succeeded",
         )
 
@@ -258,16 +260,6 @@ def _retrieval_index_id(index_artifact: IndexArtifact) -> str:
     if not isinstance(retrieval_index_id, str) or not retrieval_index_id.strip():
         raise ValueError("mapped system index artifact is missing retrieval_index_id")
     return retrieval_index_id
-
-
-def _extractive_answer(retrieved_items: list) -> str:
-    if not retrieved_items:
-        return "No local evidence was retrieved."
-    snippets = [
-        f"[{item.document_id}/{item.segment_id}] {summarize_text(item.text, max_chars=180)}"
-        for item in retrieved_items[:3]
-    ]
-    return "Local mapped-system answer from retrieved evidence: " + " ".join(snippets)
 
 
 def document_source_token_count(document: Document) -> int:

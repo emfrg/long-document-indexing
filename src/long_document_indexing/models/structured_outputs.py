@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict
 
 from long_document_indexing.domain.maps import DocumentMap, MapEntry, SourceReference
@@ -72,3 +74,20 @@ class StructuredDocumentMap(BaseModel):
 
 def _attributes_to_dict(attributes: list[StructuredMapAttribute]) -> dict[str, str]:
     return {attribute.key: attribute.value for attribute in attributes}
+
+
+class StructuredAnswerCitation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    evidence_id: str
+    document_id: str
+    segment_id: str
+    quote: str
+
+
+class StructuredGeneratedAnswer(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["answered", "insufficient_evidence"]
+    answer: str
+    citations: list[StructuredAnswerCitation]

@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from long_document_indexing.cli import _workflow_runner
-from long_document_indexing.config import ExperimentConfig, WorkflowConfig
+from long_document_indexing.config import AnsweringConfig, ExperimentConfig, WorkflowConfig
 from long_document_indexing.workflows.execution import LocalWorkflowRunner, MafWorkflowRunner
 
 
@@ -17,6 +17,7 @@ def test_workflow_config_defaults_to_local_runner() -> None:
     )
 
     assert config.workflow.runner == "local"
+    assert config.answering.mode == "extractive"
     assert isinstance(_workflow_runner(config), LocalWorkflowRunner)
 
 
@@ -37,3 +38,8 @@ def test_workflow_config_selects_maf_runner_when_available() -> None:
 def test_workflow_config_rejects_unknown_runner() -> None:
     with pytest.raises(ValueError, match="Input should be"):
         WorkflowConfig.model_validate({"runner": "unknown"})
+
+
+def test_answering_config_rejects_unknown_mode() -> None:
+    with pytest.raises(ValueError, match="Input should be"):
+        AnsweringConfig.model_validate({"mode": "unknown"})

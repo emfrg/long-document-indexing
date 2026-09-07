@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import time
 
+from long_document_indexing.answering import answer_from_retrieved_evidence, query_usage
 from long_document_indexing.config import SharedPipelineConfig
 from long_document_indexing.domain.benchmark import BenchmarkItem
 from long_document_indexing.domain.corpus import Corpus
 from long_document_indexing.domain.maps import IndexArtifact
-from long_document_indexing.domain.runs import Citation, RagRunRecord, UsageRecord
+from long_document_indexing.domain.runs import RagRunRecord
 from long_document_indexing.services import Services
 from long_document_indexing.telemetry.tracing import stable_query_run_id
 
@@ -53,14 +54,12 @@ class FlatVectorSystem:
             top_k=pipeline.retrieved_segments,
         )
         selected_document_ids = _unique_document_ids(retrieved_items)[: pipeline.selected_documents]
-        citations = [
-            Citation(
-                document_id=item.document_id,
-                segment_id=item.segment_id,
-                quote=_quote(item.text),
-            )
-            for item in retrieved_items[: pipeline.retrieved_segments]
-        ]
+        answer_result = await answer_from_retrieved_evidence(
+            item=item,
+            retrieved_items=retrieved_items[: pipeline.retrieved_segments],
+            services=services,
+            extractive_prefix="Local baseline answer from retrieved evidence",
+        )
         duration_ms = (time.perf_counter() - started) * 1000.0
         return RagRunRecord(
             run_id=stable_query_run_id(experiment_id, self.id, item.id, repetition),
@@ -71,9 +70,13 @@ class FlatVectorSystem:
             repetition=repetition,
             selected_document_ids=selected_document_ids,
             retrieved_items=retrieved_items,
-            answer=_extractive_answer(retrieved_items),
-            citations=citations,
-            usage=UsageRecord(tool_calls=1, duration_ms=duration_ms),
+            answer=answer_result.answer,
+            citations=answer_result.citations,
+            usage=query_usage(
+                answer_result.usage,
+                tool_calls=1,
+                duration_ms=duration_ms,
+            ),
             status="succeeded",
         )
 
@@ -86,20 +89,3 @@ def _unique_document_ids(retrieved_items: list) -> list[str]:
             ordered.append(item.document_id)
             seen.add(item.document_id)
     return ordered
-
-
-def _quote(text: str, max_chars: int = 240) -> str:
-    collapsed = " ".join(text.split())
-    if len(collapsed) <= max_chars:
-        return collapsed
-    return f"{collapsed[: max_chars - 3]}..."
-
-
-def _extractive_answer(retrieved_items: list) -> str:
-    if not retrieved_items:
-        return "No local evidence was retrieved."
-    snippets = [
-        f"[{item.document_id}/{item.segment_id}] {_quote(item.text, max_chars=180)}"
-        for item in retrieved_items[:3]
-    ]
-    return "Local baseline answer from retrieved evidence: " + " ".join(snippets)

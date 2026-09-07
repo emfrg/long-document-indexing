@@ -20,6 +20,8 @@ class FakeTextGenerationClient:
             payload = _reduce_document_maps_payload(request.metadata)
         elif task == "refine_document_map":
             payload = _refine_document_map_payload(request.metadata)
+        elif task == "answer_query":
+            payload = _answer_query_payload(request.metadata)
         else:
             payload = {"text": "Fake model response."}
 
@@ -104,6 +106,32 @@ def _refine_document_map_payload(metadata: dict[str, Any]) -> dict[str, Any]:
         },
         construction_method=str(metadata["strategy"]),
     ).model_dump(mode="json")
+
+
+def _answer_query_payload(metadata: dict[str, Any]) -> dict[str, Any]:
+    evidence = list(metadata.get("evidence", []))
+    if not evidence:
+        return {
+            "status": "insufficient_evidence",
+            "answer": "No retrieved evidence supports an answer.",
+            "citations": [],
+        }
+
+    citations = [
+        {
+            "evidence_id": str(item["evidence_id"]),
+            "document_id": str(item["document_id"]),
+            "segment_id": str(item["segment_id"]),
+            "quote": summarize_text(str(item["text"]), max_chars=180),
+        }
+        for item in evidence[:2]
+    ]
+    return {
+        "status": "answered",
+        "answer": "Fake generated answer from retrieved evidence: "
+        + " ".join(citation["quote"] for citation in citations),
+        "citations": citations,
+    }
 
 
 def _entry_payload(
