@@ -1,0 +1,314 @@
+{
+  "id": "enterprise-thin-slice",
+  "documents": [
+    {
+      "id": "doc_alpha_renewal",
+      "corpus_id": "enterprise-thin-slice",
+      "title": "Alpha Analytics Renewal Memo",
+      "segments": [
+        {
+          "id": "alpha_renewal_s1",
+          "document_id": "doc_alpha_renewal",
+          "order": 1,
+          "text": "On January 15, 2026, the sourcing council approved a two-year renewal with Alpha Analytics after service-level performance reached 99.94 percent.",
+          "metadata": {
+            "section": "approval"
+          }
+        },
+        {
+          "id": "alpha_renewal_s2",
+          "document_id": "doc_alpha_renewal",
+          "order": 2,
+          "text": "The renewal caps annual support fees at $480,000 and includes a 6 percent service-credit penalty if uptime falls below 99.9 percent.",
+          "metadata": {
+            "section": "commercial_terms"
+          }
+        },
+        {
+          "id": "alpha_renewal_s3",
+          "document_id": "doc_alpha_renewal",
+          "order": 3,
+          "text": "Legal required the contract owner, Priya Shah, to complete a data-processing addendum before production data can be shared with Alpha Analytics.",
+          "metadata": {
+            "section": "legal"
+          }
+        }
+      ],
+      "metadata": {
+        "source_type": "vendor_memo",
+        "business_area": "sourcing"
+      }
+    },
+    {
+      "id": "doc_beta_payments",
+      "corpus_id": "enterprise-thin-slice",
+      "title": "Beta Payment Incident Review",
+      "segments": [
+        {
+          "id": "beta_payments_s1",
+          "document_id": "doc_beta_payments",
+          "order": 1,
+          "text": "The Beta payment outage started at 14:20 UTC on February 9, 2026 when the settlement queue stopped acknowledging card batches.",
+          "metadata": {
+            "section": "timeline_start"
+          }
+        },
+        {
+          "id": "beta_payments_s2",
+          "document_id": "doc_beta_payments",
+          "order": 2,
+          "text": "Service was fully restored at 16:05 UTC after the payments team replayed 18,420 queued transactions from the backup ledger.",
+          "metadata": {
+            "section": "timeline_recovery"
+          }
+        },
+        {
+          "id": "beta_payments_s3",
+          "document_id": "doc_beta_payments",
+          "order": 3,
+          "text": "The postmortem assigned Samir Patel to add settlement queue lag alerts by March 1, 2026.",
+          "metadata": {
+            "section": "remediation"
+          }
+        }
+      ],
+      "metadata": {
+        "source_type": "incident_review",
+        "business_area": "payments"
+      }
+    },
+    {
+      "id": "doc_remote_access",
+      "corpus_id": "enterprise-thin-slice",
+      "title": "Remote Access Policy Update",
+      "segments": [
+        {
+          "id": "remote_access_s1",
+          "document_id": "doc_remote_access",
+          "order": 1,
+          "text": "The security office changed the remote access policy on March 12, 2026 to require phishing-resistant MFA for administrators.",
+          "metadata": {
+            "section": "administrator_access"
+          }
+        },
+        {
+          "id": "remote_access_s2",
+          "document_id": "doc_remote_access",
+          "order": 2,
+          "text": "Temporary vendor access now expires after seven days unless the sponsoring director files a renewal ticket.",
+          "metadata": {
+            "section": "vendor_access"
+          }
+        },
+        {
+          "id": "remote_access_s3",
+          "document_id": "doc_remote_access",
+          "order": 3,
+          "text": "The exception review board meets every Wednesday and must approve any remote access bypass longer than 24 hours.",
+          "metadata": {
+            "section": "exceptions"
+          }
+        }
+      ],
+      "metadata": {
+        "source_type": "security_policy",
+        "business_area": "security"
+      }
+    },
+    {
+      "id": "doc_orion_launch",
+      "corpus_id": "enterprise-thin-slice",
+      "title": "Project Orion Launch Brief",
+      "segments": [
+        {
+          "id": "orion_launch_s1",
+          "document_id": "doc_orion_launch",
+          "order": 1,
+          "text": "Project Orion will launch the customer analytics dashboard in the Nordic region on May 4, 2026.",
+          "metadata": {
+            "section": "launch_plan"
+          }
+        },
+        {
+          "id": "orion_launch_s2",
+          "document_id": "doc_orion_launch",
+          "order": 2,
+          "text": "The launch depends on completion of localization testing, privacy review, and a go-live checklist owned by Mei Chen.",
+          "metadata": {
+            "section": "dependencies"
+          }
+        },
+        {
+          "id": "orion_launch_s3",
+          "document_id": "doc_orion_launch",
+          "order": 3,
+          "text": "If privacy review slips past April 20, 2026, the fallback plan is to launch read-only reporting first.",
+          "metadata": {
+            "section": "fallback"
+          }
+        }
+      ],
+      "metadata": {
+        "source_type": "launch_brief",
+        "business_area": "product"
+      }
+    },
+    {
+      "id": "doc_q3_budget",
+      "corpus_id": "enterprise-thin-slice",
+      "title": "Q3 Infrastructure Budget",
+      "segments": [
+        {
+          "id": "q3_budget_s1",
+          "document_id": "doc_q3_budget",
+          "order": 1,
+          "text": "Finance approved a Q3 infrastructure budget of $1.8 million for capacity upgrades across compute, storage, and observability.",
+          "metadata": {
+            "section": "budget_total"
+          }
+        },
+        {
+          "id": "q3_budget_s2",
+          "document_id": "doc_q3_budget",
+          "order": 2,
+          "text": "$650,000 is reserved for GPU inference capacity, $420,000 for database storage, and $180,000 for reliability drills.",
+          "metadata": {
+            "section": "allocations"
+          }
+        },
+        {
+          "id": "q3_budget_s3",
+          "document_id": "doc_q3_budget",
+          "order": 3,
+          "text": "The budget review board asked infrastructure leaders to report forecast variance above 8 percent within five business days.",
+          "metadata": {
+            "section": "variance_reporting"
+          }
+        }
+      ],
+      "metadata": {
+        "source_type": "finance_plan",
+        "business_area": "infrastructure"
+      }
+    },
+    {
+      "id": "doc_manager_training",
+      "corpus_id": "enterprise-thin-slice",
+      "title": "Manager Training Program",
+      "segments": [
+        {
+          "id": "manager_training_s1",
+          "document_id": "doc_manager_training",
+          "order": 1,
+          "text": "People operations will run manager training cohorts on April 6, May 11, and June 8, 2026.",
+          "metadata": {
+            "section": "schedule"
+          }
+        },
+        {
+          "id": "manager_training_s2",
+          "document_id": "doc_manager_training",
+          "order": 2,
+          "text": "Managers who supervise more than eight people must complete the coaching module before approving midyear reviews.",
+          "metadata": {
+            "section": "requirements"
+          }
+        },
+        {
+          "id": "manager_training_s3",
+          "document_id": "doc_manager_training",
+          "order": 3,
+          "text": "The program owner is Lena Ortiz, and attendance exceptions require vice president approval.",
+          "metadata": {
+            "section": "ownership"
+          }
+        }
+      ],
+      "metadata": {
+        "source_type": "training_plan",
+        "business_area": "people"
+      }
+    },
+    {
+      "id": "doc_soc2_audit",
+      "corpus_id": "enterprise-thin-slice",
+      "title": "SOC 2 Readiness Audit",
+      "segments": [
+        {
+          "id": "soc2_audit_s1",
+          "document_id": "doc_soc2_audit",
+          "order": 1,
+          "text": "The SOC 2 readiness audit found 14 medium-risk evidence gaps, mostly in access review screenshots and change-management approvals.",
+          "metadata": {
+            "section": "findings"
+          }
+        },
+        {
+          "id": "soc2_audit_s2",
+          "document_id": "doc_soc2_audit",
+          "order": 2,
+          "text": "Compliance asked engineering managers to remediate evidence gaps by June 30, 2026.",
+          "metadata": {
+            "section": "deadline"
+          }
+        },
+        {
+          "id": "soc2_audit_s3",
+          "document_id": "doc_soc2_audit",
+          "order": 3,
+          "text": "Audit evidence must be uploaded to Vaultline with reviewer initials and control IDs in the filename.",
+          "metadata": {
+            "section": "upload_rule"
+          }
+        }
+      ],
+      "metadata": {
+        "source_type": "audit_report",
+        "business_area": "compliance"
+      }
+    },
+    {
+      "id": "doc_northwind_escalation",
+      "corpus_id": "enterprise-thin-slice",
+      "title": "Northwind Escalation Log",
+      "segments": [
+        {
+          "id": "northwind_escalation_s1",
+          "document_id": "doc_northwind_escalation",
+          "order": 1,
+          "text": "Northwind Retail escalated delayed invoice exports on July 2, 2026 after exports failed for three consecutive nights.",
+          "metadata": {
+            "section": "customer_impact"
+          }
+        },
+        {
+          "id": "northwind_escalation_s2",
+          "document_id": "doc_northwind_escalation",
+          "order": 2,
+          "text": "The support team promised a mitigation update by July 5, 2026 and assigned the case to escalation manager Omar Haddad.",
+          "metadata": {
+            "section": "owner_deadline"
+          }
+        },
+        {
+          "id": "northwind_escalation_s3",
+          "document_id": "doc_northwind_escalation",
+          "order": 3,
+          "text": "Engineering traced the failure to a timezone conversion bug in the nightly billing job.",
+          "metadata": {
+            "section": "root_cause"
+          }
+        }
+      ],
+      "metadata": {
+        "source_type": "support_log",
+        "business_area": "customer_support"
+      }
+    }
+  ],
+  "metadata": {
+    "purpose": "larger local benchmark thin slice",
+    "synthetic": true,
+    "version": "2026-09-07"
+  }
+}

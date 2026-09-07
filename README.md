@@ -122,6 +122,26 @@ This config compares `flat_vector`, `stuffing`, `map_reduce`, and `refine` with 
 
 Azure login is not required for this API-key based run. Configure `FOUNDRY_GENERATOR_BASE_URL`, `FOUNDRY_GENERATOR_DEPLOYMENT`, and `AZURE_INFERENCE_CREDENTIAL` before running it.
 
+## Enterprise Thin Slice Benchmark
+
+Milestone 11 adds a larger local benchmark fixture under `benchmarks/enterprise/`. It is synthetic and versioned in the repo: 8 documents, 24 source segments, and 16 gold-labeled questions covering policy, incident, launch, budget, training, audit, and escalation notes.
+
+Run the deterministic all-system slice without Azure credentials:
+
+```bash
+uv run --python 3.13 --no-editable --reinstall-package long-document-indexing ldi run --config configs/experiments/enterprise-thin-slice.yaml
+```
+
+This compares `flat_vector`, `stuffing`, `map_reduce`, and `refine` with generated answers from the deterministic fake generator, local metrics, usage summaries, report files, and a Foundry-ready evaluation export.
+
+After configuring the real model `.env` values, run the optional GPT-5-family stuffing-only slice:
+
+```bash
+uv run --python 3.13 --extra foundry --no-editable --reinstall-package long-document-indexing ldi run --config configs/experiments/foundry-enterprise-stuffing-thin-slice.yaml
+```
+
+That config is intentionally limited to `stuffing` to cap live model calls while exercising the same larger dataset and export path. With API-key auth, Azure login is not required.
+
 ## Reporting
 
 `ldi report` writes a compact analysis bundle under each experiment's `report/` directory:
