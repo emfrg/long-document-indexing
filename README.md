@@ -15,6 +15,37 @@ The first milestone is local-only. It includes the canonical domain model, a JSO
 
 Python 3.12 or 3.13 is required. Python 3.14 release candidates are intentionally excluded until the dependency stack supports them cleanly.
 
+## Repo Walkthrough
+
+For the architectural walkthrough, milestone map, runtime flow, and extension points, read [docs/repo-walkthrough.md](docs/repo-walkthrough.md).
+
+The short version is:
+
+```text
+experiment config -> dataset adapter -> services -> index/query workflows
+                  -> RAG system -> run records + usage -> metrics/export/report
+```
+
+## Milestone Map
+
+| Milestone | Name | Boundary |
+| --- | --- | --- |
+| 1 | Python benchmark kernel | Local domain schemas, smoke data, lexical retrieval, baseline metrics. |
+| 2 | Workflow and Telemetry foundation | Workflow runner boundary, trace records, usage ledgers, prompt loading. |
+| 3 | First Document Maps Systems | `stuffing`, `map_reduce`, and `refine` systems over shared map contracts. |
+| 4 | Real Model Client thin slice | OpenAI-compatible inference client behind the generation interface. |
+| 5 | MAF workflow thin slice | Optional Microsoft Agent Framework runner without changing system code. |
+| 6 | Foundry GPT-5 Structured Generation | Responses API path with Pydantic-backed structured outputs. |
+| 7 | Model-Backed Answer Generation | Optional generated answers with validated retrieved-evidence citations. |
+| 8 | Foundry Evaluation Export | Local JSONL export in a Foundry-ready single-turn shape. |
+| 9 | Multi-System Real Benchmark Run | Real GPT-5-family smoke comparison across all implemented systems. |
+| 10 | Analysis And Reporting Upgrade | Markdown, CSV, usage, issue, and system scorecard reports. |
+| 11 | Larger Benchmark Dataset Thin Slice | Versioned synthetic enterprise benchmark fixture. |
+| 12 | Resumable And Budgeted Live Runs | Resume, force, dry-run budget, and model-call/token/cost limits. |
+| 13 | Foundry Managed Evaluation Execution | Azure AI Evaluation SDK path over exported datasets. |
+| 14 | Larger Real Benchmark Run | GPT-5-family stuffing run over the enterprise thin slice. |
+| 15 | Repo Polish And Final Walkthrough | Documentation, verification, and final repository tour. |
+
 ## Quick Start
 
 ```bash
@@ -29,11 +60,11 @@ The CLI command uses `--no-editable` because some macOS Python 3.13 environments
 
 ## Current Shape
 
-Milestone 1 established the benchmark kernel. Milestone 2 adds workflow-neutral orchestration, local workflow run records, trace IDs, usage ledgers, prompt loading, and an optional Microsoft Agent Framework adapter boundary.
+The default path is still local and deterministic: `generator_provider: fake` runs without Azure credentials and exercises the same orchestration, metric, reporting, and export code used by real-model experiments.
 
-Milestone 3 added the first document-map systems: `stuffing`, `map_reduce`, and `refine`. These systems use the shared `TextGenerationClient` interface, with a deterministic fake implementation for local tests and smoke runs.
+The real-model path is optional. Foundry/Azure OpenAI inference is isolated behind `TextGenerationClient`, and GPT-5-family structured generation uses the Responses API with Pydantic output contracts. API-key inference does not require Azure CLI login.
 
-Milestone 5 added an optional Microsoft Agent Framework functional workflow runner. Milestone 8 adds a local Foundry evaluation export adapter. Milestone 10 upgrades the local report into a system scorecard with metric, usage, issue, and Foundry export summaries. The concrete default smoke path still runs locally.
+The Foundry evaluation path is split deliberately. Local export writes JSONL datasets under ignored `artifacts/`; managed evaluation uses the Azure AI Evaluation SDK when requested. Logging managed results to a Foundry project requires a project endpoint and may require `az login`. `azd` is only needed for provisioning or hosted-agent workflows.
 
 ## Real Model Client
 

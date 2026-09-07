@@ -47,6 +47,7 @@ include = [
     "/configs",
     "/benchmarks",
     "/prompts",
+    "/docs",
 ]
 
 [tool.ruff]
