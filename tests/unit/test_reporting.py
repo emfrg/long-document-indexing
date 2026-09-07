@@ -1,0 +1,154 @@
+from __future__ import annotations
+
+import pytest
+
+from long_document_indexing.domain.runs import (
+    Citation,
+    MetricRecord,
+    RagRunRecord,
+    RetrievedItem,
+)
+from long_document_indexing.reporting import (
+    build_report_bundle,
+    legacy_metric_csv_rows,
+    render_markdown_report,
+    system_summary_csv_rows,
+)
+from long_document_indexing.telemetry.usage import UsageEvent
+
+
+def test_report_bundle_summarizes_quality_usage_and_foundry_export() -> None:
+    bundle = build_report_bundle(
+        metrics=[
+            _metric("alpha", "document_recall_at_1", 1.0, level="routing"),
+            _metric("alpha", "citation_precision", 1.0, level="answer"),
+            _metric("alpha", "invalid_citation_rate", 0.0, level="answer"),
+            _metric("alpha", "query_duration_ms", 20.0, level="efficiency"),
+            _metric("beta", "document_recall_at_1", 0.5, level="routing"),
+            _metric("beta", "citation_precision", 0.5, level="answer"),
+            _metric("beta", "invalid_citation_rate", 0.25, level="answer"),
+            _metric("beta", "map_schema_validity", 0.75, level="document_map"),
+            _metric("beta", "map_compression_ratio", 3.0, level="document_map"),
+        ],
+        run_records=[
+            _run_record("alpha", status="succeeded"),
+            _run_record("beta", status="succeeded"),
+            _run_record("beta", status="failed"),
+        ],
+        index_usage=[
+            _usage("alpha", stage="index_system", model_calls=1, input_tokens=100),
+            _usage("beta", stage="index_system", model_calls=2, input_tokens=200),
+        ],
+        query_usage=[
+            _usage("alpha", stage="query_system", model_calls=1, output_tokens=30),
+            _usage("beta", stage="query_system", model_calls=1, output_tokens=40),
+        ],
+        foundry_manifest={
+            "dataset_path": "evaluations/foundry/dataset.jsonl",
+            "row_count": 3,
+            "systems": ["beta", "alpha"],
+            "evaluators": ["groundedness"],
+        },
+        foundry_manifest_path="/tmp/manifest.json",
+    )
+
+    alpha = _system(bundle.system_rows, "alpha")
+    beta = _system(bundle.system_rows, "beta")
+
+    assert alpha.quality_score == 1.0
+    assert alpha.total_model_calls == 2
+    assert alpha.total_tokens == 130
+    assert beta.routing_score == 0.5
+    assert beta.answer_score == pytest.approx(0.625)
+    assert beta.map_score == 0.75
+    assert beta.quality_score == pytest.approx(0.625)
+    assert beta.failed_runs == 1
+    assert "1 failed run(s)" in beta.issues
+    assert "invalid_citation_rate=0.2500" in beta.issues
+    assert bundle.foundry_export.enabled is True
+    assert bundle.foundry_export.row_count == 3
+    assert bundle.foundry_export.systems == ["alpha", "beta"]
+
+
+def test_report_renderers_keep_legacy_metric_csv_and_add_scorecard_rows() -> None:
+    bundle = build_report_bundle(
+        metrics=[_metric("alpha", "document_recall_at_1", 1.0, level="routing")],
+        run_records=[_run_record("alpha", status="succeeded")],
+        index_usage=[],
+        query_usage=[],
+    )
+
+    assert legacy_metric_csv_rows(bundle.metric_rows) == [
+        {
+            "system_id": "alpha",
+            "metric": "document_recall_at_1",
+            "mean": 1.0,
+            "count": 1.0,
+        }
+    ]
+    assert system_summary_csv_rows(bundle.system_rows)[0]["quality_score"] == 1.0
+    markdown = render_markdown_report(bundle)
+    assert "## System Scorecard" in markdown
+    assert "## Metric Means" in markdown
+    assert "No Foundry export manifest was found." in markdown
+
+
+def _metric(system_id: str, name: str, value: float, *, level: str) -> MetricRecord:
+    return MetricRecord(
+        experiment_id="exp",
+        run_id=f"run-{system_id}-{name}",
+        system_id=system_id,
+        corpus_id="corpus",
+        item_id="item",
+        level=level,
+        name=name,
+        value=value,
+    )
+
+
+def _usage(
+    system_id: str,
+    *,
+    stage: str,
+    model_calls: int,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+) -> UsageEvent:
+    return UsageEvent(
+        experiment_id="exp",
+        run_id=f"run-{system_id}-{stage}",
+        system_id=system_id,
+        corpus_id="corpus",
+        stage=stage,
+        kind="system",
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        model_calls=model_calls,
+    )
+
+
+def _run_record(system_id: str, *, status: str) -> RagRunRecord:
+    return RagRunRecord(
+        run_id=f"run-{system_id}-{status}",
+        experiment_id="exp",
+        system_id=system_id,
+        corpus_id="corpus",
+        item_id="item",
+        selected_document_ids=["doc"],
+        retrieved_items=[
+            RetrievedItem(
+                document_id="doc",
+                segment_id="seg",
+                text="Evidence.",
+                rank=1,
+                retrieval_stage="test",
+            )
+        ],
+        answer="Answer.",
+        citations=[Citation(document_id="doc", segment_id="seg")],
+        status=status,
+    )
+
+
+def _system(rows, system_id: str):
+    return next(row for row in rows if row.system_id == system_id)

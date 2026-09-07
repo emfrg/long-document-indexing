@@ -27,6 +27,10 @@ def test_smoke_run_writes_metrics_and_report(tmp_path) -> None:
     experiment_dir = tmp_path / "artifacts" / "smoke-test"
     assert (experiment_dir / "evaluations" / "local-metrics.jsonl").exists()
     assert (experiment_dir / "report" / "results.md").exists()
+    assert (experiment_dir / "report" / "results.csv").exists()
+    assert (experiment_dir / "report" / "system-summary.csv").exists()
+    assert (experiment_dir / "report" / "usage-summary.csv").exists()
+    assert (experiment_dir / "report" / "summary.json").exists()
 
 
 def test_foundry_eval_export_smoke_writes_dataset_and_manifest(tmp_path) -> None:
@@ -52,3 +56,6 @@ def test_foundry_eval_export_smoke_writes_dataset_and_manifest(tmp_path) -> None
     assert dataset_path.exists()
     assert manifest_path.exists()
     assert len(dataset_path.read_text(encoding="utf-8").splitlines()) == 2
+    assert (experiment_dir / "report" / "system-summary.csv").exists()
+    assert (experiment_dir / "report" / "usage-summary.csv").exists()
+    assert (experiment_dir / "report" / "summary.json").exists()

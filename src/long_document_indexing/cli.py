@@ -17,9 +17,16 @@ from long_document_indexing.evaluation.foundry import (
     write_foundry_evaluation_export,
 )
 from long_document_indexing.evaluation.local.maps import evaluate_index_artifact
-from long_document_indexing.evaluation.runner import aggregate_metric_means, evaluate_run
+from long_document_indexing.evaluation.runner import evaluate_run
 from long_document_indexing.models.factory import create_text_generation_client
 from long_document_indexing.prompts import PromptLoader
+from long_document_indexing.reporting import (
+    build_report_bundle,
+    legacy_metric_csv_rows,
+    render_markdown_report,
+    system_summary_csv_rows,
+    usage_summary_csv_rows,
+)
 from long_document_indexing.retrieval.local_vector import LocalVectorBackend
 from long_document_indexing.services import Services
 from long_document_indexing.storage.artifacts import ArtifactStore
@@ -222,16 +229,66 @@ def _report(config: ExperimentConfig) -> None:
         MetricRecord.model_validate(row)
         for row in store.read_jsonl("evaluations/local-metrics.jsonl")
     ]
-    rows = aggregate_metric_means(metrics)
+    bundle = build_report_bundle(
+        metrics=metrics,
+        run_records=_load_run_records_for_report(config, store),
+        index_usage=_load_usage_events(store, "costs/index-usage.jsonl"),
+        query_usage=_load_usage_events(store, "costs/query-usage.jsonl"),
+        foundry_manifest=_load_foundry_manifest(config, store),
+        foundry_manifest_path=_foundry_manifest_path(config, store),
+    )
 
-    csv_path = store.path("report/results.csv")
-    with csv_path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=["system_id", "metric", "mean", "count"])
-        writer.writeheader()
-        writer.writerows(rows)
+    _write_csv(
+        store.path("report/results.csv"),
+        ["system_id", "metric", "mean", "count"],
+        legacy_metric_csv_rows(bundle.metric_rows),
+    )
+    _write_csv(
+        store.path("report/system-summary.csv"),
+        [
+            "system_id",
+            "query_runs",
+            "failed_runs",
+            "skipped_runs",
+            "quality_score",
+            "routing_score",
+            "retrieval_score",
+            "answer_score",
+            "map_score",
+            "query_duration_ms_mean",
+            "tool_calls_mean",
+            "index_model_calls",
+            "query_model_calls",
+            "total_model_calls",
+            "input_tokens",
+            "output_tokens",
+            "total_tokens",
+            "estimated_cost",
+            "issues",
+        ],
+        system_summary_csv_rows(bundle.system_rows),
+    )
+    _write_csv(
+        store.path("report/usage-summary.csv"),
+        [
+            "system_id",
+            "phase",
+            "kind",
+            "records",
+            "input_tokens",
+            "output_tokens",
+            "total_tokens",
+            "model_calls",
+            "tool_calls",
+            "duration_ms",
+            "estimated_cost",
+        ],
+        usage_summary_csv_rows(bundle.usage_rows),
+    )
+    store.write_json("report/summary.json", bundle)
 
     markdown_path = store.path("report/results.md")
-    markdown_path.write_text(_markdown_table(rows), encoding="utf-8")
+    markdown_path.write_text(render_markdown_report(bundle), encoding="utf-8")
     typer.echo(f"Wrote report to {markdown_path}")
 
 
@@ -310,6 +367,41 @@ def _load_run_records(config: ExperimentConfig, store: ArtifactStore) -> list[Ra
     return records
 
 
+def _load_run_records_for_report(
+    config: ExperimentConfig,
+    store: ArtifactStore,
+) -> list[RagRunRecord]:
+    records: list[RagRunRecord] = []
+    for system_id in config.systems:
+        system = create_system(system_id)
+        records.extend(
+            RagRunRecord.model_validate(row) for row in store.read_jsonl(f"runs/{system.id}.jsonl")
+        )
+    return records
+
+
+def _load_usage_events(store: ArtifactStore, relative_path: str) -> list[UsageEvent]:
+    return [UsageEvent.model_validate(row) for row in store.read_jsonl(relative_path)]
+
+
+def _load_foundry_manifest(
+    config: ExperimentConfig,
+    store: ArtifactStore,
+) -> dict | None:
+    manifest_relative_path = config.evaluation.foundry.manifest_path
+    manifest_path = store.experiment_dir / manifest_relative_path
+    if not manifest_path.exists():
+        return None
+    return store.read_json(manifest_relative_path)
+
+
+def _foundry_manifest_path(config: ExperimentConfig, store: ArtifactStore) -> str | None:
+    manifest_path = store.experiment_dir / config.evaluation.foundry.manifest_path
+    if not manifest_path.exists():
+        return None
+    return str(manifest_path)
+
+
 def _validate_loaded_dataset(loaded: LoadedDataset) -> None:
     corpus_ids = {corpus.id for corpus in loaded.corpora}
     missing = [item.id for item in loaded.question_set.items if item.corpus_id not in corpus_ids]
@@ -322,16 +414,8 @@ def _write_usage(services: Services, relative_path: str) -> None:
     services.artifact_store.write_jsonl(relative_path, records)
 
 
-def _markdown_table(rows: list[dict[str, str | float]]) -> str:
-    lines = [
-        "# Local Metric Summary",
-        "",
-        "| system_id | metric | mean | count |",
-        "| --- | ---: | ---: | ---: |",
-    ]
-    for row in rows:
-        lines.append(
-            f"| {row['system_id']} | {row['metric']} | {row['mean']:.4f} | {int(row['count'])} |"
-        )
-    lines.append("")
-    return "\n".join(lines)
+def _write_csv(path: Path, fieldnames: list[str], rows: list[dict]) -> None:
+    with path.open("w", encoding="utf-8", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)

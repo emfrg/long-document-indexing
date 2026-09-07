@@ -33,7 +33,7 @@ Milestone 1 established the benchmark kernel. Milestone 2 adds workflow-neutral 
 
 Milestone 3 added the first document-map systems: `stuffing`, `map_reduce`, and `refine`. These systems use the shared `TextGenerationClient` interface, with a deterministic fake implementation for local tests and smoke runs.
 
-Milestone 5 added an optional Microsoft Agent Framework functional workflow runner. Milestone 8 adds a local Foundry evaluation export adapter. The concrete default smoke path still runs locally.
+Milestone 5 added an optional Microsoft Agent Framework functional workflow runner. Milestone 8 adds a local Foundry evaluation export adapter. Milestone 10 upgrades the local report into a system scorecard with metric, usage, issue, and Foundry export summaries. The concrete default smoke path still runs locally.
 
 ## Real Model Client
 
@@ -121,6 +121,20 @@ uv run --python 3.13 --extra foundry --no-editable --reinstall-package long-docu
 This config compares `flat_vector`, `stuffing`, `map_reduce`, and `refine` with `answering.mode: generated` and Foundry evaluation export enabled. On the bundled smoke corpus, it performs 12 document-map generation calls and 8 generated-answer calls. The run writes local metrics, usage JSONL files, a Markdown/CSV report, and a Foundry-ready evaluation dataset under `artifacts/foundry-multi-system-real-smoke/`.
 
 Azure login is not required for this API-key based run. Configure `FOUNDRY_GENERATOR_BASE_URL`, `FOUNDRY_GENERATOR_DEPLOYMENT`, and `AZURE_INFERENCE_CREDENTIAL` before running it.
+
+## Reporting
+
+`ldi report` writes a compact analysis bundle under each experiment's `report/` directory:
+
+```text
+report/results.md
+report/results.csv
+report/system-summary.csv
+report/usage-summary.csv
+report/summary.json
+```
+
+`results.csv` remains the simple metric mean table for compatibility. `system-summary.csv` adds quality, routing, retrieval, answer, map, latency, token, model-call, and issue columns. `usage-summary.csv` aggregates index/query usage by system and event kind. `summary.json` preserves the complete typed report bundle for scripts or notebooks.
 
 ## MAF Workflow Runner
 
