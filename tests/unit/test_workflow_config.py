@@ -8,6 +8,7 @@ from long_document_indexing.config import (
     AnsweringConfig,
     ExperimentConfig,
     FoundryEvaluationConfig,
+    RunControlConfig,
     WorkflowConfig,
 )
 from long_document_indexing.workflows.execution import LocalWorkflowRunner, MafWorkflowRunner
@@ -24,6 +25,8 @@ def test_workflow_config_defaults_to_local_runner() -> None:
 
     assert config.workflow.runner == "local"
     assert config.answering.mode == "extractive"
+    assert config.run_control.resume is False
+    assert config.run_control.force is False
     assert config.evaluation.foundry.enabled is False
     assert config.evaluation.foundry.evaluation_level == "turn"
     assert isinstance(_workflow_runner(config), LocalWorkflowRunner)
@@ -51,6 +54,14 @@ def test_workflow_config_rejects_unknown_runner() -> None:
 def test_answering_config_rejects_unknown_mode() -> None:
     with pytest.raises(ValueError, match="Input should be"):
         AnsweringConfig.model_validate({"mode": "unknown"})
+
+
+def test_run_control_config_rejects_invalid_budget_policy() -> None:
+    with pytest.raises(ValidationError, match="cannot both be true"):
+        RunControlConfig.model_validate({"resume": True, "force": True})
+
+    with pytest.raises(ValidationError, match="must not be negative"):
+        RunControlConfig.model_validate({"max_model_calls": -1})
 
 
 def test_foundry_evaluation_config_rejects_non_artifact_relative_paths() -> None:

@@ -62,6 +62,8 @@ export AZURE_INFERENCE_CREDENTIAL="<api-key>"
 
 With `generator_auth_mode: api_key`, Azure CLI login is not required. Azure login is only needed if you switch the config to `generator_auth_mode: azure_default_credential` or start provisioning/managing Azure resources.
 
+Real-model configs include `run_control.resume: true` and a conservative `max_model_calls` cap. Completed index artifacts and successful query records are reused on rerun. Use `--force` only when you intentionally want to spend calls again.
+
 Then run the real-client stuffing smoke config:
 
 ```bash
@@ -141,6 +143,29 @@ uv run --python 3.13 --extra foundry --no-editable --reinstall-package long-docu
 ```
 
 That config is intentionally limited to `stuffing` to cap live model calls while exercising the same larger dataset and export path. With API-key auth, Azure login is not required.
+
+## Resumable And Budgeted Runs
+
+Milestone 12 adds run-control safety for real-model experiments:
+
+```yaml
+run_control:
+  resume: true
+  max_model_calls: 24
+  max_total_tokens: 50000
+```
+
+`resume: true` reuses valid index artifacts and successful query records. Failed or skipped query records are retried. `max_model_calls`, `max_input_tokens`, `max_output_tokens`, `max_total_tokens`, and `max_estimated_cost` are enforced against recorded usage.
+
+CLI flags can override the config for one command:
+
+```bash
+uv run --python 3.13 --no-editable --reinstall-package long-document-indexing ldi run --config configs/experiments/enterprise-thin-slice.yaml --resume
+uv run --python 3.13 --no-editable --reinstall-package long-document-indexing ldi run --config configs/experiments/enterprise-thin-slice.yaml --force
+uv run --python 3.13 --no-editable --reinstall-package long-document-indexing ldi run --config configs/experiments/enterprise-thin-slice.yaml --dry-run-budget
+```
+
+The runner writes index artifacts, run records, and usage ledgers incrementally. If a budget is exceeded after a completed unit, the completed artifact remains on disk and the next run can resume from that point.
 
 ## Reporting
 

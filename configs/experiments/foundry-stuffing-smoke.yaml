@@ -34,6 +34,10 @@ shared_pipeline:
 systems:
   - stuffing
 
+run_control:
+  resume: true
+  max_model_calls: 2
+
 evaluation:
   local:
     - map_schema_validity

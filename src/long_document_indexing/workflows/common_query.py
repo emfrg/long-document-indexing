@@ -4,10 +4,11 @@ from long_document_indexing.config import SharedPipelineConfig
 from long_document_indexing.domain.benchmark import BenchmarkItem
 from long_document_indexing.domain.corpus import Corpus
 from long_document_indexing.domain.maps import IndexArtifact
-from long_document_indexing.domain.runs import RagRunRecord, RunContext
+from long_document_indexing.domain.runs import RagRunRecord, RunContext, UsageRecord
 from long_document_indexing.services import Services
 from long_document_indexing.systems.base import RagSystem
 from long_document_indexing.telemetry.tracing import stable_query_run_id
+from long_document_indexing.workflows.execution import WorkflowExecutionError
 
 WORKFLOW_NAME = "common_query"
 
@@ -52,7 +53,41 @@ async def run_query_workflow(
             item_id=item.id,
         )
 
-    result = await services.workflow_runner.run(WORKFLOW_NAME, context, operation)
+    try:
+        result = await services.workflow_runner.run(WORKFLOW_NAME, context, operation)
+    except WorkflowExecutionError as exc:
+        workflow_path = services.artifact_store.write_json(
+            f"workflows/query/{system.id}/{item.id}/rep-{repetition}.json",
+            exc.record,
+        )
+        services.usage_ledger.record_usage(
+            context,
+            stage=WORKFLOW_NAME,
+            kind="workflow",
+            duration_ms=exc.record.duration_ms,
+            metadata={
+                "workflow_artifact_path": str(workflow_path),
+                "status": "failed",
+            },
+        )
+        return RagRunRecord(
+            run_id=context.run_id,
+            experiment_id=context.experiment_id,
+            system_id=system.id,
+            corpus_id=corpus.id,
+            item_id=item.id,
+            repetition=repetition,
+            selected_document_ids=[],
+            retrieved_items=[],
+            answer="",
+            citations=[],
+            usage=UsageRecord(),
+            trace_id=exc.record.trace_id,
+            workflow_artifact_path=str(workflow_path),
+            status="failed",
+            error=exc.record.error,
+        )
+
     workflow_path = services.artifact_store.write_json(
         f"workflows/query/{system.id}/{item.id}/rep-{repetition}.json",
         result.record,

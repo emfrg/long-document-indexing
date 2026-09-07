@@ -83,4 +83,6 @@ def test_foundry_enterprise_stuffing_config_caps_live_thin_slice_scope(monkeypat
     assert config.models.generator_max_output_tokens == 6000
     assert config.answering.mode == "generated"
     assert config.systems == ["stuffing"]
+    assert config.run_control.resume is True
+    assert config.run_control.max_model_calls == 24
     assert config.evaluation.foundry.enabled is True

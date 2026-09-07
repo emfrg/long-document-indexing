@@ -67,6 +67,43 @@ async def test_common_workflows_persist_records_and_usage(tmp_path) -> None:
     }
 
 
+async def test_common_query_workflow_returns_failed_record_on_system_error(tmp_path) -> None:
+    corpus = _corpus()
+    item = BenchmarkItem(
+        id="q1",
+        corpus_id=corpus.id,
+        query="alpha board approval",
+        ground_truth=GroundTruth(
+            relevant_document_ids={"doc_alpha"},
+            relevant_segment_ids={"alpha_s1"},
+        ),
+    )
+    services = _services(tmp_path)
+    artifact = IndexArtifact(
+        id="idx",
+        system_id="failing",
+        corpus_id=corpus.id,
+        artifact_path="idx",
+    )
+
+    record = await run_query_workflow(
+        system=FailingQuerySystem(),
+        item=item,
+        corpus=corpus,
+        index_artifact=artifact,
+        services=services,
+        pipeline=SharedPipelineConfig(),
+        experiment_id="exp",
+        repetition=0,
+    )
+
+    assert record.status == "failed"
+    assert record.error == "query failed"
+    assert record.workflow_artifact_path is not None
+    assert Path(record.workflow_artifact_path).exists()
+    assert services.usage_ledger.records[0].metadata["status"] == "failed"
+
+
 def test_validate_index_artifact_rejects_mismatched_system() -> None:
     artifact = IndexArtifact(
         id="idx",
@@ -77,6 +114,33 @@ def test_validate_index_artifact_rejects_mismatched_system() -> None:
 
     with pytest.raises(ValueError, match="system_id mismatch"):
         validate_index_artifact(artifact, system_id="flat_vector", corpus_id="corpus")
+
+
+class FailingQuerySystem:
+    id = "failing"
+
+    async def build_index(
+        self,
+        corpus: Corpus,
+        services: Services,
+        pipeline: SharedPipelineConfig,
+    ) -> IndexArtifact:
+        del corpus, services, pipeline
+        raise NotImplementedError
+
+    async def run_query(
+        self,
+        item: BenchmarkItem,
+        corpus: Corpus,
+        index_artifact: IndexArtifact,
+        services: Services,
+        pipeline: SharedPipelineConfig,
+        *,
+        experiment_id: str,
+        repetition: int,
+    ) -> None:
+        del item, corpus, index_artifact, services, pipeline, experiment_id, repetition
+        raise RuntimeError("query failed")
 
 
 def _services(tmp_path) -> Services:

@@ -111,6 +111,56 @@ class AnsweringConfig(BaseModel):
     mode: Literal["extractive", "generated"] = "extractive"
 
 
+class RunControlConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    resume: bool = False
+    force: bool = False
+    max_model_calls: int | None = None
+    max_input_tokens: int | None = None
+    max_output_tokens: int | None = None
+    max_total_tokens: int | None = None
+    max_estimated_cost: float | None = None
+
+    @field_validator(
+        "max_model_calls",
+        "max_input_tokens",
+        "max_output_tokens",
+        "max_total_tokens",
+    )
+    @classmethod
+    def _integer_budget_must_not_be_negative(cls, value: int | None) -> int | None:
+        if value is not None and value < 0:
+            raise ValueError("budget limits must not be negative")
+        return value
+
+    @field_validator("max_estimated_cost")
+    @classmethod
+    def _cost_budget_must_not_be_negative(cls, value: float | None) -> float | None:
+        if value is not None and value < 0:
+            raise ValueError("budget limits must not be negative")
+        return value
+
+    @model_validator(mode="after")
+    def _resume_and_force_are_mutually_exclusive(self) -> RunControlConfig:
+        if self.resume and self.force:
+            raise ValueError("run_control.resume and run_control.force cannot both be true")
+        return self
+
+    @property
+    def has_budget_limits(self) -> bool:
+        return any(
+            value is not None
+            for value in (
+                self.max_model_calls,
+                self.max_input_tokens,
+                self.max_output_tokens,
+                self.max_total_tokens,
+                self.max_estimated_cost,
+            )
+        )
+
+
 class FoundryEvaluationConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -176,6 +226,7 @@ class ExperimentConfig(BaseModel):
     shared_pipeline: SharedPipelineConfig = Field(default_factory=SharedPipelineConfig)
     workflow: WorkflowConfig = Field(default_factory=WorkflowConfig)
     answering: AnsweringConfig = Field(default_factory=AnsweringConfig)
+    run_control: RunControlConfig = Field(default_factory=RunControlConfig)
     systems: list[str]
     evaluation: EvaluationConfig = Field(default_factory=EvaluationConfig)
     storage: StorageConfig = Field(default_factory=StorageConfig)

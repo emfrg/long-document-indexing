@@ -43,6 +43,10 @@ systems:
   - map_reduce
   - refine
 
+run_control:
+  resume: true
+  max_model_calls: 20
+
 evaluation:
   local:
     - map_schema_validity

@@ -7,6 +7,7 @@ from long_document_indexing.domain.runs import RunContext, UsageRecord
 from long_document_indexing.services import Services
 from long_document_indexing.systems.base import RagSystem
 from long_document_indexing.telemetry.tracing import stable_index_run_id
+from long_document_indexing.workflows.execution import WorkflowExecutionError
 
 WORKFLOW_NAME = "common_indexing"
 
@@ -32,7 +33,25 @@ async def run_indexing_workflow(
         artifact = await system.build_index(corpus, services, pipeline)
         return validate_index_artifact(artifact, system_id=system.id, corpus_id=corpus.id)
 
-    result = await services.workflow_runner.run(WORKFLOW_NAME, context, operation)
+    try:
+        result = await services.workflow_runner.run(WORKFLOW_NAME, context, operation)
+    except WorkflowExecutionError as exc:
+        workflow_path = services.artifact_store.write_json(
+            f"workflows/indexing/{system.id}/{corpus.id}.json",
+            exc.record,
+        )
+        services.usage_ledger.record_usage(
+            context,
+            stage=WORKFLOW_NAME,
+            kind="workflow",
+            duration_ms=exc.record.duration_ms,
+            metadata={
+                "workflow_artifact_path": str(workflow_path),
+                "status": "failed",
+            },
+        )
+        raise
+
     workflow_path = services.artifact_store.write_json(
         f"workflows/indexing/{system.id}/{corpus.id}.json",
         result.record,

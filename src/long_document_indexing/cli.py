@@ -2,16 +2,21 @@ from __future__ import annotations
 
 import asyncio
 import csv
+from collections.abc import Coroutine
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 
-from long_document_indexing.config import ExperimentConfig, load_experiment_config
+from long_document_indexing.config import (
+    ExperimentConfig,
+    RunControlConfig,
+    load_experiment_config,
+)
 from long_document_indexing.datasets.base import LoadedDataset
 from long_document_indexing.datasets.registry import create_dataset_adapter
 from long_document_indexing.domain.maps import IndexArtifact
-from long_document_indexing.domain.runs import MetricRecord, RagRunRecord
+from long_document_indexing.domain.runs import MetricRecord, RagRunRecord, UsageRecord
 from long_document_indexing.evaluation.foundry import (
     FoundryEvaluationExport,
     write_foundry_evaluation_export,
@@ -28,9 +33,15 @@ from long_document_indexing.reporting import (
     usage_summary_csv_rows,
 )
 from long_document_indexing.retrieval.local_vector import LocalVectorBackend
+from long_document_indexing.run_control import (
+    BudgetExceeded,
+    BudgetLedger,
+    describe_budget,
+)
 from long_document_indexing.services import Services
 from long_document_indexing.storage.artifacts import ArtifactStore
 from long_document_indexing.systems.registry import create_system
+from long_document_indexing.telemetry.tracing import stable_query_run_id
 from long_document_indexing.telemetry.usage import UsageEvent, UsageLedger
 from long_document_indexing.workflows.common_indexing import run_indexing_workflow
 from long_document_indexing.workflows.common_query import run_query_workflow
@@ -38,6 +49,18 @@ from long_document_indexing.workflows.execution import LocalWorkflowRunner, MafW
 
 app = typer.Typer(no_args_is_help=True)
 ConfigPath = Annotated[Path, typer.Option("--config", "-c")]
+ResumeFlag = Annotated[
+    bool,
+    typer.Option("--resume", help="Reuse succeeded index artifacts and query records."),
+]
+ForceFlag = Annotated[
+    bool,
+    typer.Option("--force", help="Ignore reusable artifacts and rebuild or requery work."),
+]
+DryRunBudgetFlag = Annotated[
+    bool,
+    typer.Option("--dry-run-budget", help="Print run-control budget status without executing."),
+]
 
 
 @app.command()
@@ -48,17 +71,39 @@ def prepare(config: ConfigPath) -> None:
 
 
 @app.command()
-def index(config: ConfigPath) -> None:
+def index(
+    config: ConfigPath,
+    resume: ResumeFlag = False,
+    force: ForceFlag = False,
+    dry_run_budget: DryRunBudgetFlag = False,
+) -> None:
     """Build index artifacts for all configured systems and corpora."""
 
-    asyncio.run(_index(load_experiment_config(config)))
+    experiment_config = load_experiment_config(config)
+    run_control = _effective_run_control(experiment_config, resume=resume, force=force)
+    experiment_config = experiment_config.model_copy(update={"run_control": run_control})
+    if dry_run_budget:
+        _dry_run_budget(experiment_config, run_control)
+        return
+    _run_with_budget_handling(_index(experiment_config, run_control=run_control))
 
 
 @app.command()
-def query(config: ConfigPath) -> None:
+def query(
+    config: ConfigPath,
+    resume: ResumeFlag = False,
+    force: ForceFlag = False,
+    dry_run_budget: DryRunBudgetFlag = False,
+) -> None:
     """Run benchmark questions through existing index artifacts."""
 
-    asyncio.run(_query(load_experiment_config(config)))
+    experiment_config = load_experiment_config(config)
+    run_control = _effective_run_control(experiment_config, resume=resume, force=force)
+    experiment_config = experiment_config.model_copy(update={"run_control": run_control})
+    if dry_run_budget:
+        _dry_run_budget(experiment_config, run_control)
+        return
+    _run_with_budget_handling(_query(experiment_config, run_control=run_control))
 
 
 @app.command()
@@ -83,15 +128,96 @@ def report(config: ConfigPath) -> None:
 
 
 @app.command()
-def run(config: ConfigPath) -> None:
+def run(
+    config: ConfigPath,
+    resume: ResumeFlag = False,
+    force: ForceFlag = False,
+    dry_run_budget: DryRunBudgetFlag = False,
+) -> None:
     """Execute prepare, index, query, evaluate, and report."""
 
     experiment_config = load_experiment_config(config)
+    run_control = _effective_run_control(experiment_config, resume=resume, force=force)
+    experiment_config = experiment_config.model_copy(update={"run_control": run_control})
+    if dry_run_budget:
+        _dry_run_budget(experiment_config, run_control)
+        return
+
     _prepare(experiment_config)
-    asyncio.run(_index(experiment_config))
-    asyncio.run(_query(experiment_config))
+    budget = _budget_ledger(
+        _artifact_store(experiment_config),
+        run_control,
+        include_existing_usage=run_control.resume,
+    )
+    _run_with_budget_handling(
+        _run_index_and_query(experiment_config, run_control=run_control, budget=budget)
+    )
     _evaluate(experiment_config)
     _report(experiment_config)
+
+
+async def _run_index_and_query(
+    config: ExperimentConfig,
+    *,
+    run_control: RunControlConfig,
+    budget: BudgetLedger,
+) -> None:
+    await _index(config, run_control=run_control, budget=budget)
+    await _query(config, run_control=run_control, budget=budget)
+
+
+def _run_with_budget_handling(coro: Coroutine[Any, Any, None]) -> None:
+    try:
+        asyncio.run(coro)
+    except BudgetExceeded as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=2) from exc
+
+
+def _effective_run_control(
+    config: ExperimentConfig,
+    *,
+    resume: bool,
+    force: bool,
+) -> RunControlConfig:
+    if resume and force:
+        raise typer.BadParameter("--resume and --force cannot be used together")
+
+    payload = config.run_control.model_dump()
+    if resume:
+        payload["resume"] = True
+        payload["force"] = False
+    if force:
+        payload["resume"] = False
+        payload["force"] = True
+    return RunControlConfig.model_validate(payload)
+
+
+def _dry_run_budget(config: ExperimentConfig, run_control: RunControlConfig) -> None:
+    loaded = _load_dataset(config)
+    experiment_dir = config.storage.artifacts_dir / config.experiment.id
+    existing_index_events = _load_usage_events_from_dir(experiment_dir, "costs/index-usage.jsonl")
+    existing_query_events = _load_usage_events_from_dir(experiment_dir, "costs/query-usage.jsonl")
+    initial_events = [*existing_index_events, *existing_query_events] if run_control.resume else []
+    budget = BudgetLedger(run_control, initial_events=initial_events)
+    existing_artifacts = _load_index_artifacts_from_dir(experiment_dir)
+    existing_runs = _load_run_records_from_dir(experiment_dir, config)
+    successful_runs = [record for record in existing_runs if record.status == "succeeded"]
+    planned_index_units = len(config.systems) * len(loaded.corpora)
+    planned_query_units = (
+        len(config.systems) * len(loaded.question_set.items) * config.experiment.query_repetitions
+    )
+
+    typer.echo(f"Experiment: {config.experiment.id}")
+    typer.echo(f"Run control: resume={run_control.resume}, force={run_control.force}")
+    typer.echo(
+        "Planned units: "
+        f"index={planned_index_units}, query={planned_query_units}, "
+        f"existing_indexes={len(existing_artifacts)}, "
+        f"existing_successful_queries={len(successful_runs)}"
+    )
+    for line in describe_budget(run_control, budget.snapshot):
+        typer.echo(line)
 
 
 def _prepare(config: ExperimentConfig) -> None:
@@ -105,6 +231,7 @@ def _prepare(config: ExperimentConfig) -> None:
             "dataset": config.dataset.model_dump(mode="json"),
             "systems": config.systems,
             "answering": config.answering.model_dump(mode="json"),
+            "run_control": config.run_control.model_dump(mode="json"),
             "corpus_ids": [corpus.id for corpus in loaded.corpora],
             "question_count": len(loaded.question_set.items),
         },
@@ -112,15 +239,43 @@ def _prepare(config: ExperimentConfig) -> None:
     typer.echo(f"Prepared experiment {config.experiment.id}")
 
 
-async def _index(config: ExperimentConfig) -> None:
+async def _index(
+    config: ExperimentConfig,
+    *,
+    run_control: RunControlConfig | None = None,
+    budget: BudgetLedger | None = None,
+) -> None:
     loaded = _load_dataset(config)
     services = _services(config)
-    artifacts: list[IndexArtifact] = []
+    run_control = run_control or config.run_control
+    budget = budget or _budget_ledger(
+        services.artifact_store,
+        run_control,
+        include_existing_usage=run_control.resume,
+    )
+    existing_artifacts = (
+        _load_index_artifacts_if_present(services.artifact_store)
+        if run_control.resume and not run_control.force
+        else []
+    )
+    artifacts_by_key = {
+        _index_artifact_key(artifact): artifact
+        for artifact in existing_artifacts
+        if _is_reusable_index_artifact(artifact)
+    }
+    indexed = 0
+    reused = 0
 
     for system_id in config.systems:
         system = create_system(system_id)
-        system_artifacts: list[IndexArtifact] = []
         for corpus in loaded.corpora:
+            key = (system.id, corpus.id)
+            if key in artifacts_by_key:
+                reused += 1
+                continue
+
+            label = f"index {system.id}/{corpus.id}"
+            budget.require_available(label)
             artifact = await run_indexing_workflow(
                 system=system,
                 corpus=corpus,
@@ -128,27 +283,59 @@ async def _index(config: ExperimentConfig) -> None:
                 pipeline=config.shared_pipeline,
                 experiment_id=config.experiment.id,
             )
-            artifacts.append(artifact)
-            system_artifacts.append(artifact)
-        services.artifact_store.write_jsonl(
-            f"indexes/{system.id}/index_artifacts.jsonl",
-            system_artifacts,
-        )
+            artifacts_by_key[key] = artifact
+            indexed += 1
+            budget.add_usage(_usage_from_index_artifact(artifact))
+            _write_index_artifacts(config, loaded, services.artifact_store, artifacts_by_key)
+            _write_usage(
+                services,
+                "costs/index-usage.jsonl",
+                preserve_existing=run_control.resume and not run_control.force,
+            )
+            budget.require_not_exceeded(label)
 
-    services.artifact_store.write_jsonl("indexes/index_artifacts.jsonl", artifacts)
-    _write_usage(services, "costs/index-usage.jsonl")
-    typer.echo(f"Indexed {len(artifacts)} system/corpus pair(s)")
+    _write_index_artifacts(config, loaded, services.artifact_store, artifacts_by_key)
+    _write_usage(
+        services,
+        "costs/index-usage.jsonl",
+        preserve_existing=run_control.resume and not run_control.force,
+    )
+    message = f"Indexed {indexed} system/corpus pair(s)"
+    if reused:
+        message += f"; reused {reused}"
+    typer.echo(message)
 
 
-async def _query(config: ExperimentConfig) -> None:
+async def _query(
+    config: ExperimentConfig,
+    *,
+    run_control: RunControlConfig | None = None,
+    budget: BudgetLedger | None = None,
+) -> None:
     loaded = _load_dataset(config)
     services = _services(config)
+    run_control = run_control or config.run_control
+    budget = budget or _budget_ledger(
+        services.artifact_store,
+        run_control,
+        include_existing_usage=run_control.resume,
+    )
     artifacts = _load_index_artifacts(services.artifact_store)
     corpora_by_id = {corpus.id: corpus for corpus in loaded.corpora}
 
     for system_id in config.systems:
         system = create_system(system_id)
-        records: list[RagRunRecord] = []
+        records_by_run_id: dict[str, RagRunRecord] = (
+            {
+                record.run_id: record
+                for record in _load_system_run_records(services.artifact_store, system.id)
+            }
+            if run_control.resume and not run_control.force
+            else {}
+        )
+        queried = 0
+        reused = 0
+        skipped = 0
         for artifact in artifacts:
             if artifact.system_id != system.id:
                 continue
@@ -158,21 +345,72 @@ async def _query(config: ExperimentConfig) -> None:
             ]
             for item in items:
                 for repetition in range(config.experiment.query_repetitions):
-                    records.append(
-                        await run_query_workflow(
-                            system=system,
-                            item=item,
-                            corpus=corpus,
-                            index_artifact=artifact,
-                            services=services,
-                            pipeline=config.shared_pipeline,
-                            experiment_id=config.experiment.id,
-                            repetition=repetition,
-                        )
+                    run_id = stable_query_run_id(
+                        config.experiment.id,
+                        system.id,
+                        item.id,
+                        repetition,
                     )
-        services.artifact_store.write_jsonl(f"runs/{system.id}.jsonl", records)
-        typer.echo(f"Queried {len(records)} item run(s) for {system.id}")
-    _write_usage(services, "costs/query-usage.jsonl")
+                    existing = records_by_run_id.get(run_id)
+                    if existing is not None and existing.status == "succeeded":
+                        reused += 1
+                        continue
+
+                    label = f"query {system.id}/{item.id}/rep-{repetition}"
+                    exhausted_reason = budget.exhausted_reason(label)
+                    if exhausted_reason is not None:
+                        records_by_run_id[run_id] = _skipped_run_record(
+                            config,
+                            system_id=system.id,
+                            corpus_id=corpus.id,
+                            item_id=item.id,
+                            repetition=repetition,
+                            reason=exhausted_reason,
+                        )
+                        skipped += 1
+                        _write_system_run_records(
+                            services.artifact_store,
+                            system.id,
+                            records_by_run_id,
+                        )
+                        continue
+
+                    record = await run_query_workflow(
+                        system=system,
+                        item=item,
+                        corpus=corpus,
+                        index_artifact=artifact,
+                        services=services,
+                        pipeline=config.shared_pipeline,
+                        experiment_id=config.experiment.id,
+                        repetition=repetition,
+                    )
+                    records_by_run_id[run_id] = record
+                    queried += 1
+                    budget.add_usage(record.usage)
+                    _write_system_run_records(
+                        services.artifact_store,
+                        system.id,
+                        records_by_run_id,
+                    )
+                    _write_usage(
+                        services,
+                        "costs/query-usage.jsonl",
+                        preserve_existing=run_control.resume and not run_control.force,
+                    )
+                    budget.require_not_exceeded(label)
+        _write_system_run_records(services.artifact_store, system.id, records_by_run_id)
+        message = f"Queried {queried} item run(s) for {system.id}"
+        if reused:
+            message += f"; reused {reused}"
+        if skipped:
+            message += f"; skipped {skipped}"
+        typer.echo(message)
+    _write_usage(
+        services,
+        "costs/query-usage.jsonl",
+        preserve_existing=run_control.resume and not run_control.force,
+    )
 
 
 def _evaluate(config: ExperimentConfig) -> None:
@@ -355,6 +593,76 @@ def _load_index_artifacts(store: ArtifactStore) -> list[IndexArtifact]:
     return [IndexArtifact.model_validate(row) for row in rows]
 
 
+def _load_index_artifacts_if_present(store: ArtifactStore) -> list[IndexArtifact]:
+    return [
+        IndexArtifact.model_validate(row)
+        for row in store.read_jsonl("indexes/index_artifacts.jsonl")
+    ]
+
+
+def _load_index_artifacts_from_dir(experiment_dir: Path) -> list[IndexArtifact]:
+    path = experiment_dir / "indexes/index_artifacts.jsonl"
+    if not path.exists():
+        return []
+    return [
+        IndexArtifact.model_validate_json(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def _write_index_artifacts(
+    config: ExperimentConfig,
+    loaded: LoadedDataset,
+    store: ArtifactStore,
+    artifacts_by_key: dict[tuple[str, str], IndexArtifact],
+) -> list[IndexArtifact]:
+    ordered_artifacts = _ordered_index_artifacts(config, loaded, artifacts_by_key)
+    for system_id in config.systems:
+        system = create_system(system_id)
+        store.write_jsonl(
+            f"indexes/{system.id}/index_artifacts.jsonl",
+            [artifact for artifact in ordered_artifacts if artifact.system_id == system.id],
+        )
+    store.write_jsonl("indexes/index_artifacts.jsonl", ordered_artifacts)
+    return ordered_artifacts
+
+
+def _ordered_index_artifacts(
+    config: ExperimentConfig,
+    loaded: LoadedDataset,
+    artifacts_by_key: dict[tuple[str, str], IndexArtifact],
+) -> list[IndexArtifact]:
+    ordered = []
+    for system_id in config.systems:
+        system = create_system(system_id)
+        for corpus in loaded.corpora:
+            artifact = artifacts_by_key.get((system.id, corpus.id))
+            if artifact is not None:
+                ordered.append(artifact)
+    return ordered
+
+
+def _index_artifact_key(artifact: IndexArtifact) -> tuple[str, str]:
+    return artifact.system_id, artifact.corpus_id
+
+
+def _is_reusable_index_artifact(artifact: IndexArtifact) -> bool:
+    if not Path(artifact.artifact_path).exists():
+        return False
+    paths = artifact.build_metadata.get("document_map_paths", {})
+    if not isinstance(paths, dict):
+        return True
+    return all(Path(str(path)).exists() for path in paths.values())
+
+
+def _usage_from_index_artifact(artifact: IndexArtifact) -> UsageRecord:
+    usage = artifact.build_metadata.get("usage")
+    if isinstance(usage, dict):
+        return UsageRecord.model_validate(usage)
+    return UsageRecord()
+
+
 def _load_run_records(config: ExperimentConfig, store: ArtifactStore) -> list[RagRunRecord]:
     records: list[RagRunRecord] = []
     for system_id in config.systems:
@@ -365,6 +673,66 @@ def _load_run_records(config: ExperimentConfig, store: ArtifactStore) -> list[Ra
     if not records:
         raise FileNotFoundError("no run records found; run `ldi query` first")
     return records
+
+
+def _load_system_run_records(store: ArtifactStore, system_id: str) -> list[RagRunRecord]:
+    return [RagRunRecord.model_validate(row) for row in store.read_jsonl(f"runs/{system_id}.jsonl")]
+
+
+def _load_run_records_from_dir(
+    experiment_dir: Path,
+    config: ExperimentConfig,
+) -> list[RagRunRecord]:
+    records: list[RagRunRecord] = []
+    for system_id in config.systems:
+        system = create_system(system_id)
+        path = experiment_dir / f"runs/{system.id}.jsonl"
+        if not path.exists():
+            continue
+        records.extend(
+            RagRunRecord.model_validate_json(line)
+            for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        )
+    return records
+
+
+def _write_system_run_records(
+    store: ArtifactStore,
+    system_id: str,
+    records_by_run_id: dict[str, RagRunRecord],
+) -> None:
+    records = sorted(
+        records_by_run_id.values(),
+        key=lambda record: (record.corpus_id, record.item_id, record.repetition),
+    )
+    store.write_jsonl(f"runs/{system_id}.jsonl", records)
+
+
+def _skipped_run_record(
+    config: ExperimentConfig,
+    *,
+    system_id: str,
+    corpus_id: str,
+    item_id: str,
+    repetition: int,
+    reason: str,
+) -> RagRunRecord:
+    return RagRunRecord(
+        run_id=stable_query_run_id(config.experiment.id, system_id, item_id, repetition),
+        experiment_id=config.experiment.id,
+        system_id=system_id,
+        corpus_id=corpus_id,
+        item_id=item_id,
+        repetition=repetition,
+        selected_document_ids=[],
+        retrieved_items=[],
+        answer="",
+        citations=[],
+        usage=UsageRecord(),
+        status="skipped",
+        error=reason,
+    )
 
 
 def _load_run_records_for_report(
@@ -382,6 +750,34 @@ def _load_run_records_for_report(
 
 def _load_usage_events(store: ArtifactStore, relative_path: str) -> list[UsageEvent]:
     return [UsageEvent.model_validate(row) for row in store.read_jsonl(relative_path)]
+
+
+def _load_usage_events_from_dir(experiment_dir: Path, relative_path: str) -> list[UsageEvent]:
+    path = experiment_dir / relative_path
+    if not path.exists():
+        return []
+    return [
+        UsageEvent.model_validate_json(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def _budget_ledger(
+    store: ArtifactStore,
+    run_control: RunControlConfig,
+    *,
+    include_existing_usage: bool,
+) -> BudgetLedger:
+    existing_usage = (
+        [
+            *_load_usage_events(store, "costs/index-usage.jsonl"),
+            *_load_usage_events(store, "costs/query-usage.jsonl"),
+        ]
+        if include_existing_usage
+        else []
+    )
+    return BudgetLedger(run_control, initial_events=existing_usage)
 
 
 def _load_foundry_manifest(
@@ -409,9 +805,50 @@ def _validate_loaded_dataset(loaded: LoadedDataset) -> None:
         raise ValueError(f"question items reference unknown corpora: {missing}")
 
 
-def _write_usage(services: Services, relative_path: str) -> None:
+def _write_usage(
+    services: Services,
+    relative_path: str,
+    *,
+    preserve_existing: bool = False,
+) -> None:
     records: list[UsageEvent] = services.usage_ledger.records
+    if preserve_existing:
+        records = _merge_usage_events(
+            _load_usage_events(services.artifact_store, relative_path),
+            records,
+        )
     services.artifact_store.write_jsonl(relative_path, records)
+
+
+def _merge_usage_events(
+    existing: list[UsageEvent],
+    new: list[UsageEvent],
+) -> list[UsageEvent]:
+    merged = {_usage_event_key(event): event for event in existing}
+    for event in new:
+        merged[_usage_event_key(event)] = event
+    return sorted(
+        merged.values(),
+        key=lambda event: (
+            event.system_id,
+            event.corpus_id,
+            event.item_id or "",
+            event.repetition,
+            event.stage,
+            event.kind,
+        ),
+    )
+
+
+def _usage_event_key(event: UsageEvent) -> tuple[str, str, str | None, int, str, str]:
+    return (
+        event.run_id,
+        event.stage,
+        event.item_id,
+        event.repetition,
+        event.kind,
+        event.system_id,
+    )
 
 
 def _write_csv(path: Path, fieldnames: list[str], rows: list[dict]) -> None:

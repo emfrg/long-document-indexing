@@ -139,5 +139,7 @@ def test_foundry_multi_system_real_smoke_config_shape(monkeypatch) -> None:
     assert config.models.generator_response_format == "structured"
     assert config.answering.mode == "generated"
     assert config.systems == ["flat_vector", "stuffing", "map_reduce", "refine"]
+    assert config.run_control.resume is True
+    assert config.run_control.max_model_calls == 20
     assert config.evaluation.foundry.enabled is True
     assert config.evaluation.foundry.evaluation_level == "turn"

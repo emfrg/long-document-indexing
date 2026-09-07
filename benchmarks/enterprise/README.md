@@ -11,3 +11,5 @@ It contains:
 - Relevant document and segment labels for local routing, retrieval, and citation metrics.
 
 The dataset is intentionally small and versioned in the repo. It is not meant to model a production distribution yet; it exists to expose cross-document routing, retrieval, citation, and reporting behavior before larger external datasets or live Foundry evaluation runs are introduced.
+
+Use `configs/experiments/enterprise-thin-slice.yaml` for the local deterministic all-system run. Use `configs/experiments/foundry-enterprise-stuffing-thin-slice.yaml` only after credentials are configured; it is resumable and capped at 24 model calls.
