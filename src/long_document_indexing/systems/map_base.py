@@ -10,7 +10,7 @@ from long_document_indexing.answering import answer_from_retrieved_evidence, que
 from long_document_indexing.config import SharedPipelineConfig
 from long_document_indexing.domain.benchmark import BenchmarkItem
 from long_document_indexing.domain.corpus import Corpus, Document, Segment
-from long_document_indexing.domain.maps import DocumentMap, IndexArtifact
+from long_document_indexing.domain.maps import DocumentMap, IndexArtifact, MapEntry, SourceReference
 from long_document_indexing.domain.runs import RagRunRecord, UsageRecord
 from long_document_indexing.models.base import GenerationRequest, GenerationResponse
 from long_document_indexing.models.structured_outputs import StructuredDocumentMap
@@ -49,7 +49,25 @@ class DocumentMapSystemBase(ABC):
         result = await self.build_document_maps(corpus, services, pipeline)
 
         document_map_paths: dict[str, str] = {}
-        for document_map in result.document_maps:
+        documents = corpus.document_by_id()
+        document_maps = [
+            normalize_document_map_source_references(
+                document_map, documents[document_map.document_id]
+            )
+            if document_map.document_id in documents
+            else document_map
+            for document_map in result.document_maps
+        ]
+        intermediate_maps = {
+            map_id: normalize_document_map_source_references(
+                document_map, documents[document_map.document_id]
+            )
+            if document_map.document_id in documents
+            else document_map
+            for map_id, document_map in result.intermediate_maps.items()
+        }
+
+        for document_map in document_maps:
             map_id, path = write_document_map(
                 services.artifact_store,
                 system_id=self.id,
@@ -59,7 +77,7 @@ class DocumentMapSystemBase(ABC):
             document_map_paths[map_id] = str(path)
 
         intermediate_map_paths: dict[str, str] = {}
-        for map_id, document_map in result.intermediate_maps.items():
+        for map_id, document_map in intermediate_maps.items():
             path = services.artifact_store.write_json(
                 f"indexes/{self.id}/intermediate_maps/{map_id}.json",
                 document_map,
@@ -78,6 +96,11 @@ class DocumentMapSystemBase(ABC):
             build_metadata["intermediate_map_paths"] = intermediate_map_paths
         if result.metadata:
             build_metadata["strategy_metadata"] = result.metadata
+        source_reference_normalization = _source_reference_normalization_metadata(
+            [*document_maps, *intermediate_maps.values()]
+        )
+        if source_reference_normalization:
+            build_metadata["source_reference_normalization"] = source_reference_normalization
         artifact = IndexArtifact(
             id=artifact_id,
             system_id=self.id,
@@ -190,7 +213,10 @@ class DocumentMapSystemBase(ABC):
                 response_model=StructuredDocumentMap,
             )
         )
-        document_map = DocumentMap.model_validate_json(response.content)
+        document_map = normalize_document_map_source_references(
+            DocumentMap.model_validate_json(response.content),
+            document,
+        )
         return document_map, response.usage
 
 
@@ -208,6 +234,43 @@ def combine_usage(*records: UsageRecord) -> UsageRecord:
     )
 
 
+def normalize_document_map_source_references(
+    document_map: DocumentMap,
+    document: Document,
+) -> DocumentMap:
+    """Repair model-produced source references against canonical document segments."""
+
+    valid_segment_ids = {segment.id for segment in document.segments}
+    summary = _empty_source_reference_normalization_summary()
+
+    if document_map.document_id != document.id:
+        summary["map_document_id_rewrites"] += 1
+
+    entries = [
+        _normalize_entry_source_references(
+            entry,
+            document_id=document.id,
+            valid_segment_ids=valid_segment_ids,
+            summary=summary,
+        )
+        for entry in document_map.entries
+    ]
+    facets = dict(document_map.facets)
+    if _has_source_reference_repairs(summary):
+        facets[_SOURCE_REFERENCE_NORMALIZATION_FACET] = _merge_source_reference_summaries(
+            facets.get(_SOURCE_REFERENCE_NORMALIZATION_FACET),
+            summary,
+        )
+
+    return document_map.model_copy(
+        update={
+            "document_id": document.id,
+            "entries": entries,
+            "facets": facets,
+        }
+    )
+
+
 def _generator_client(services: Services):
     if services.generator_client is None:
         raise RuntimeError(
@@ -215,6 +278,163 @@ def _generator_client(services: Services):
             "The default CLI uses FakeTextGenerationClient for local smoke runs."
         )
     return services.generator_client
+
+
+_SOURCE_REFERENCE_NORMALIZATION_FACET = "source_reference_normalization"
+_SOURCE_REFERENCE_COUNT_KEYS = (
+    "map_document_id_rewrites",
+    "reference_document_id_rewrites",
+    "references_dropped",
+    "invalid_segment_ids_dropped",
+    "duplicate_segment_ids_dropped",
+    "entries_without_source_references",
+)
+_SOURCE_REFERENCE_SAMPLE_KEYS = (
+    "wrong_reference_document_ids",
+    "invalid_segment_ids",
+)
+_SOURCE_REFERENCE_SAMPLE_LIMIT = 20
+
+
+def _normalize_entry_source_references(
+    entry: MapEntry,
+    *,
+    document_id: str,
+    valid_segment_ids: set[str],
+    summary: dict[str, Any],
+) -> MapEntry:
+    source_references = [
+        reference
+        for reference in (
+            _normalize_source_reference(
+                reference,
+                document_id=document_id,
+                valid_segment_ids=valid_segment_ids,
+                summary=summary,
+            )
+            for reference in entry.source_references
+        )
+        if reference is not None
+    ]
+    children = [
+        _normalize_entry_source_references(
+            child,
+            document_id=document_id,
+            valid_segment_ids=valid_segment_ids,
+            summary=summary,
+        )
+        for child in entry.children
+    ]
+    if not source_references:
+        summary["entries_without_source_references"] += 1
+
+    return entry.model_copy(
+        update={
+            "source_references": source_references,
+            "children": children,
+        }
+    )
+
+
+def _normalize_source_reference(
+    reference: SourceReference,
+    *,
+    document_id: str,
+    valid_segment_ids: set[str],
+    summary: dict[str, Any],
+) -> SourceReference | None:
+    segment_ids: list[str] = []
+    seen_segment_ids = set()
+    for segment_id in reference.segment_ids:
+        if segment_id not in valid_segment_ids:
+            summary["invalid_segment_ids_dropped"] += 1
+            _append_source_reference_sample(summary, "invalid_segment_ids", segment_id)
+            continue
+        if segment_id in seen_segment_ids:
+            summary["duplicate_segment_ids_dropped"] += 1
+            continue
+        segment_ids.append(segment_id)
+        seen_segment_ids.add(segment_id)
+
+    if not segment_ids:
+        summary["references_dropped"] += 1
+        if reference.document_id != document_id:
+            _append_source_reference_sample(
+                summary,
+                "wrong_reference_document_ids",
+                reference.document_id,
+            )
+        return None
+
+    if reference.document_id != document_id:
+        summary["reference_document_id_rewrites"] += 1
+        _append_source_reference_sample(
+            summary,
+            "wrong_reference_document_ids",
+            reference.document_id,
+        )
+
+    return SourceReference(document_id=document_id, segment_ids=segment_ids)
+
+
+def _empty_source_reference_normalization_summary() -> dict[str, Any]:
+    return {
+        **dict.fromkeys(_SOURCE_REFERENCE_COUNT_KEYS, 0),
+        **{key: [] for key in _SOURCE_REFERENCE_SAMPLE_KEYS},
+    }
+
+
+def _has_source_reference_repairs(summary: dict[str, Any]) -> bool:
+    return any(int(summary[key]) > 0 for key in _SOURCE_REFERENCE_COUNT_KEYS)
+
+
+def _append_source_reference_sample(
+    summary: dict[str, Any],
+    key: str,
+    value: str,
+) -> None:
+    sample = summary[key]
+    if value and value not in sample and len(sample) < _SOURCE_REFERENCE_SAMPLE_LIMIT:
+        sample.append(value)
+
+
+def _merge_source_reference_summaries(
+    existing: Any,
+    new: dict[str, Any],
+) -> dict[str, Any]:
+    merged = _empty_source_reference_normalization_summary()
+    if isinstance(existing, dict):
+        for key in _SOURCE_REFERENCE_COUNT_KEYS:
+            merged[key] = int(existing.get(key, 0))
+        for key in _SOURCE_REFERENCE_SAMPLE_KEYS:
+            values = existing.get(key, [])
+            if isinstance(values, list):
+                for value in values:
+                    _append_source_reference_sample(merged, key, str(value))
+
+    for key in _SOURCE_REFERENCE_COUNT_KEYS:
+        merged[key] += int(new[key])
+    for key in _SOURCE_REFERENCE_SAMPLE_KEYS:
+        for value in new[key]:
+            _append_source_reference_sample(merged, key, str(value))
+    return merged
+
+
+def _source_reference_normalization_metadata(
+    document_maps: list[DocumentMap],
+) -> dict[str, Any]:
+    merged = _empty_source_reference_normalization_summary()
+    repaired_map_count = 0
+    for document_map in document_maps:
+        summary = document_map.facets.get(_SOURCE_REFERENCE_NORMALIZATION_FACET)
+        if not isinstance(summary, dict):
+            continue
+        repaired_map_count += 1
+        merged = _merge_source_reference_summaries(merged, summary)
+
+    if repaired_map_count == 0 or not _has_source_reference_repairs(merged):
+        return {}
+    return {"repaired_map_count": repaired_map_count, **merged}
 
 
 def _segment_payload(segment: Segment) -> dict[str, Any]:
@@ -335,7 +555,13 @@ async def reduce_maps_with_model(
             response_model=StructuredDocumentMap,
         )
     )
-    return DocumentMap.model_validate_json(response.content), response.usage
+    return (
+        normalize_document_map_source_references(
+            DocumentMap.model_validate_json(response.content),
+            document,
+        ),
+        response.usage,
+    )
 
 
 async def refine_map_with_model(
@@ -380,4 +606,10 @@ async def refine_map_with_model(
             response_model=StructuredDocumentMap,
         )
     )
-    return DocumentMap.model_validate_json(response.content), response.usage
+    return (
+        normalize_document_map_source_references(
+            DocumentMap.model_validate_json(response.content),
+            document,
+        ),
+        response.usage,
+    )

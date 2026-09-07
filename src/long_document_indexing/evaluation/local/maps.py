@@ -60,6 +60,8 @@ def source_reference_validity(document_maps: list[DocumentMap], corpus: Corpus) 
                         continue
                     if reference.document_id != document_map.document_id:
                         continue
+                    if not reference.segment_ids:
+                        continue
                     if all(
                         segment_id in segments
                         and segments[segment_id].document_id == reference.document_id

@@ -5,13 +5,18 @@ from pathlib import Path
 from long_document_indexing.config import SharedPipelineConfig
 from long_document_indexing.domain.benchmark import BenchmarkItem, GroundTruth
 from long_document_indexing.domain.corpus import Corpus, Document, Segment
+from long_document_indexing.domain.maps import DocumentMap, MapEntry, SourceReference
+from long_document_indexing.domain.runs import UsageRecord
+from long_document_indexing.evaluation.local.maps import evaluate_index_artifact
 from long_document_indexing.models.fake import FakeTextGenerationClient
 from long_document_indexing.prompts import PromptLoader
 from long_document_indexing.retrieval.local_vector import LocalVectorBackend
 from long_document_indexing.services import Services
 from long_document_indexing.storage.artifacts import ArtifactStore
+from long_document_indexing.storage.maps import read_document_map
 from long_document_indexing.systems.agentic_map import AgenticMapSystem
 from long_document_indexing.systems.hierarchical_map import HierarchicalMapSystem
+from long_document_indexing.systems.map_base import DocumentMapSystemBase, MapBuildResult
 from long_document_indexing.systems.map_reduce import MapReduceSystem
 from long_document_indexing.systems.outline_then_fill import OutlineThenFillSystem
 from long_document_indexing.systems.refine import RefineSystem
@@ -148,6 +153,50 @@ async def test_mapped_query_can_generate_model_backed_answer(tmp_path) -> None:
     }
 
 
+async def test_map_build_normalizes_invalid_source_references_before_persistence(
+    tmp_path,
+) -> None:
+    corpus = _corpus()
+    services = _services(tmp_path)
+    system = _BadReferenceSystem()
+
+    artifact = await run_indexing_workflow(
+        system=system,
+        corpus=corpus,
+        services=services,
+        pipeline=SharedPipelineConfig(selected_documents=1, retrieved_segments=2),
+        experiment_id="exp",
+    )
+
+    map_path = next(iter(artifact.build_metadata["document_map_paths"].values()))
+    document_map = read_document_map(map_path)
+    references = document_map.entries[0].source_references
+    metrics = evaluate_index_artifact(
+        artifact,
+        corpus,
+        services.artifact_store,
+        ["map_source_reference_validity"],
+        experiment_id="exp",
+    )
+
+    assert references == [SourceReference(document_id="doc_alpha", segment_ids=["alpha_s1"])]
+    assert document_map.entries[0].children[0].source_references == [
+        SourceReference(document_id="doc_alpha", segment_ids=["alpha_s2"])
+    ]
+    assert document_map.facets["source_reference_normalization"] == {
+        "map_document_id_rewrites": 0,
+        "reference_document_id_rewrites": 1,
+        "references_dropped": 2,
+        "invalid_segment_ids_dropped": 2,
+        "duplicate_segment_ids_dropped": 1,
+        "entries_without_source_references": 0,
+        "wrong_reference_document_ids": ["doc_wrong"],
+        "invalid_segment_ids": ["missing_segment", "beta_s1"],
+    }
+    assert artifact.build_metadata["source_reference_normalization"]["repaired_map_count"] == 1
+    assert metrics[0].value == 1.0
+
+
 def _services(tmp_path, *, answering_mode: str = "extractive") -> Services:
     store = ArtifactStore(tmp_path / "artifacts", "exp")
     return Services(
@@ -197,3 +246,67 @@ def _corpus() -> Corpus:
             ),
         ],
     )
+
+
+class _BadReferenceSystem(DocumentMapSystemBase):
+    id = "bad_reference"
+    construction_method = "bad_reference"
+
+    async def build_document_maps(
+        self,
+        corpus: Corpus,
+        services: Services,
+        pipeline: SharedPipelineConfig,
+    ) -> MapBuildResult:
+        del services, pipeline
+        return MapBuildResult(
+            document_maps=[
+                DocumentMap(
+                    document_id="doc_alpha",
+                    overview="Bad reference map.",
+                    entries=[
+                        MapEntry(
+                            id="entry_1",
+                            kind="section",
+                            label="Alpha",
+                            summary="Alpha summary.",
+                            source_references=[
+                                SourceReference(
+                                    document_id="doc_wrong",
+                                    segment_ids=[
+                                        "alpha_s1",
+                                        "missing_segment",
+                                        "alpha_s1",
+                                    ],
+                                ),
+                                SourceReference(
+                                    document_id="doc_alpha",
+                                    segment_ids=["beta_s1"],
+                                ),
+                                SourceReference(
+                                    document_id="doc_alpha",
+                                    segment_ids=[],
+                                ),
+                            ],
+                            children=[
+                                MapEntry(
+                                    id="entry_2",
+                                    kind="section",
+                                    label="Alpha child",
+                                    summary="Alpha child summary.",
+                                    source_references=[
+                                        SourceReference(
+                                            document_id="doc_alpha",
+                                            segment_ids=["alpha_s2"],
+                                        )
+                                    ],
+                                )
+                            ],
+                        )
+                    ],
+                    construction_method=self.construction_method,
+                )
+            ],
+            usage=UsageRecord(),
+            statuses={"doc_alpha": "indexed"},
+        )
