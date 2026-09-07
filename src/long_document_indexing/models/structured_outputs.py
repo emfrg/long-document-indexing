@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
@@ -60,10 +61,11 @@ class StructuredDocumentMap(BaseModel):
     construction_method: str
 
     def to_document_map(self) -> DocumentMap:
+        entries = _deduplicate_entry_ids([entry.to_domain() for entry in self.entries])
         return DocumentMap(
             document_id=self.document_id,
             overview=self.overview,
-            entries=[entry.to_domain() for entry in self.entries],
+            entries=entries,
             facets=_attributes_to_dict(self.facets),
             construction_method=self.construction_method,
         )
@@ -74,6 +76,26 @@ class StructuredDocumentMap(BaseModel):
 
 def _attributes_to_dict(attributes: list[StructuredMapAttribute]) -> dict[str, str]:
     return {attribute.key: attribute.value for attribute in attributes}
+
+
+def _deduplicate_entry_ids(entries: list[MapEntry]) -> list[MapEntry]:
+    occurrences: defaultdict[str, int] = defaultdict(int)
+
+    def rewrite(entry: MapEntry) -> MapEntry:
+        base_id = entry.id.strip() or "entry"
+        occurrences[base_id] += 1
+        entry_id = base_id
+        if occurrences[base_id] > 1:
+            entry_id = f"{base_id}_{occurrences[base_id]}"
+
+        return entry.model_copy(
+            update={
+                "id": entry_id,
+                "children": [rewrite(child) for child in entry.children],
+            }
+        )
+
+    return [rewrite(entry) for entry in entries]
 
 
 class StructuredAnswerCitation(BaseModel):
