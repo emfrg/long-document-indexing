@@ -22,6 +22,7 @@ def create_text_generation_client(config: ModelConfig) -> TextGenerationClient:
                 field_name="generator_deployment",
                 provider=config.generator_provider,
             ),
+            api=config.generator_api,
             api_key_env=config.generator_api_key_env,
             auth_mode=config.generator_auth_mode,
             azure_scope=config.generator_azure_scope,

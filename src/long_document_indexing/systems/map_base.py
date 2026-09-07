@@ -12,6 +12,7 @@ from long_document_indexing.domain.corpus import Corpus, Document, Segment
 from long_document_indexing.domain.maps import DocumentMap, IndexArtifact
 from long_document_indexing.domain.runs import Citation, RagRunRecord, UsageRecord
 from long_document_indexing.models.base import GenerationRequest, GenerationResponse
+from long_document_indexing.models.structured_outputs import StructuredDocumentMap
 from long_document_indexing.prompts import render_prompt
 from long_document_indexing.services import Services
 from long_document_indexing.storage.maps import read_document_map, write_document_map
@@ -151,6 +152,7 @@ class DocumentMapSystemBase(ABC):
             {
                 "document_id": document.id,
                 "title": document.title or document.id,
+                "construction_method": self.construction_method,
                 "segment_count": len(segments),
                 "segments": _segments_for_prompt(segments),
             },
@@ -166,6 +168,7 @@ class DocumentMapSystemBase(ABC):
                     "segments": [_segment_payload(segment) for segment in segments],
                     **(extra_metadata or {}),
                 },
+                response_model=StructuredDocumentMap,
             )
         )
         document_map = DocumentMap.model_validate_json(response.content)
@@ -286,6 +289,7 @@ async def reduce_maps_with_model(
         {
             "document_id": document.id,
             "title": document.title or document.id,
+            "construction_method": strategy,
             "partial_map_count": len(partial_maps),
             "partial_maps": json.dumps(
                 [document_map.model_dump(mode="json") for document_map in partial_maps],
@@ -306,6 +310,7 @@ async def reduce_maps_with_model(
                     document_map.model_dump(mode="json") for document_map in partial_maps
                 ],
             },
+            response_model=StructuredDocumentMap,
         )
     )
     return DocumentMap.model_validate_json(response.content), response.usage
@@ -327,6 +332,7 @@ async def refine_map_with_model(
         {
             "document_id": document.id,
             "title": document.title or document.id,
+            "construction_method": strategy,
             "segment_id": segment.id,
             "segment_text": segment.text,
             "existing_map": json.dumps(
@@ -349,6 +355,7 @@ async def refine_map_with_model(
                 if existing_map is not None
                 else None,
             },
+            response_model=StructuredDocumentMap,
         )
     )
     return DocumentMap.model_validate_json(response.content), response.usage

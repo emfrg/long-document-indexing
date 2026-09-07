@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from long_document_indexing.domain.benchmark import DatasetCapabilities
 
 _ENV_PATTERN = re.compile(r"\$\{([A-Z0-9_]+)(?::-(.*?))?\}")
+_ENV_NAME_PATTERN = re.compile(r"[A-Z0-9_]+")
 
 
 class ExperimentMetadata(BaseModel):
@@ -54,6 +55,7 @@ class ModelConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     generator_provider: Literal["fake", "foundry", "openai_compatible"] = "fake"
+    generator_api: Literal["chat_completions", "responses"] = "chat_completions"
     generator_deployment: str | None = None
     generator_base_url: str | None = None
     generator_api_key_env: str = "AZURE_INFERENCE_CREDENTIAL"
@@ -62,7 +64,7 @@ class ModelConfig(BaseModel):
     generator_temperature: float = 0.0
     generator_max_output_tokens: int | None = None
     generator_timeout_seconds: float = 60.0
-    generator_response_format: Literal["json_object", "text"] = "json_object"
+    generator_response_format: Literal["structured", "json_object", "text"] = "json_object"
     judge_deployment: str | None = None
     embedding_deployment: str | None = None
 
@@ -154,6 +156,7 @@ class ExperimentConfig(BaseModel):
 
 def load_experiment_config(path: Path, project_root: Path | None = None) -> ExperimentConfig:
     project_root = project_root or Path.cwd()
+    _load_local_env(project_root / ".env")
     raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     if raw is None:
         raise ValueError(f"empty config file: {path}")
@@ -183,3 +186,23 @@ def _expand_env_string(value: str) -> str:
         return match.group(0)
 
     return _ENV_PATTERN.sub(replace, value)
+
+
+def _load_local_env(path: Path) -> None:
+    if not path.exists():
+        return
+
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+
+        name, raw_value = line.split("=", 1)
+        name = name.strip()
+        if not _ENV_NAME_PATTERN.fullmatch(name):
+            continue
+
+        value = raw_value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {"'", '"'}:
+            value = value[1:-1]
+        os.environ.setdefault(name, value)

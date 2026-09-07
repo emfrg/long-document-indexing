@@ -20,11 +20,15 @@ def test_model_factory_creates_foundry_client_without_importing_openai() -> None
             generator_provider="foundry",
             generator_base_url="https://example.openai.azure.com/openai/v1/",
             generator_deployment="doc-map",
+            generator_api="responses",
+            generator_response_format="structured",
         )
     )
 
     assert isinstance(client, OpenAICompatibleTextGenerationClient)
     assert client.deployment == "doc-map"
+    assert client.api == "responses"
+    assert client.response_format == "structured"
 
 
 def test_model_factory_requires_resolved_real_client_values() -> None:
@@ -50,6 +54,8 @@ dataset:
   adapter: jsonl
 models:
   generator_provider: foundry
+  generator_api: responses
+  generator_response_format: structured
   generator_base_url: ${FOUNDRY_GENERATOR_BASE_URL}
   generator_deployment: ${FOUNDRY_GENERATOR_DEPLOYMENT}
 systems:
@@ -61,5 +67,48 @@ systems:
     config = load_experiment_config(config_path, project_root=tmp_path)
 
     assert config.models.generator_provider == "foundry"
+    assert config.models.generator_api == "responses"
+    assert config.models.generator_response_format == "structured"
     assert config.models.generator_base_url == "https://example.openai.azure.com/openai/v1/"
     assert config.models.generator_deployment == "doc-map"
+
+
+def test_model_config_loads_values_from_dotenv(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("FOUNDRY_GENERATOR_BASE_URL", raising=False)
+    monkeypatch.delenv("FOUNDRY_GENERATOR_DEPLOYMENT", raising=False)
+    monkeypatch.delenv("AZURE_INFERENCE_CREDENTIAL", raising=False)
+    (tmp_path / ".env").write_text(
+        "\n".join(
+            [
+                "FOUNDRY_GENERATOR_BASE_URL=https://example.openai.azure.com/openai/v1/responses",
+                "FOUNDRY_GENERATOR_DEPLOYMENT=gpt-5-mini-doc-map-generator",
+                "AZURE_INFERENCE_CREDENTIAL=test-key",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "experiment.yaml"
+    config_path.write_text(
+        """
+experiment:
+  id: dotenv-config
+dataset:
+  adapter: jsonl
+models:
+  generator_provider: foundry
+  generator_api: responses
+  generator_response_format: structured
+  generator_base_url: ${FOUNDRY_GENERATOR_BASE_URL}
+  generator_deployment: ${FOUNDRY_GENERATOR_DEPLOYMENT}
+systems:
+  - stuffing
+""".strip(),
+        encoding="utf-8",
+    )
+
+    config = load_experiment_config(config_path, project_root=tmp_path)
+
+    assert config.models.generator_base_url.endswith("/responses")
+    assert config.models.generator_deployment == "gpt-5-mini-doc-map-generator"
+    assert config.models.generator_response_format == "structured"
+    assert create_text_generation_client(config.models).base_url.endswith("/openai/v1/")

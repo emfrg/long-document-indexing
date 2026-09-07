@@ -31,13 +31,13 @@ The CLI command uses `--no-editable` because some macOS Python 3.13 environments
 
 Milestone 1 established the benchmark kernel. Milestone 2 adds workflow-neutral orchestration, local workflow run records, trace IDs, usage ledgers, prompt loading, and an optional Microsoft Agent Framework adapter boundary.
 
-The concrete smoke path still runs locally. The MAF runner is intentionally a boundary for now; model-backed MAF workflows arrive after the local benchmark contracts are stable.
-
 Milestone 3 added the first document-map systems: `stuffing`, `map_reduce`, and `refine`. These systems use the shared `TextGenerationClient` interface, with a deterministic fake implementation for local tests and smoke runs.
+
+Milestone 5 added an optional Microsoft Agent Framework functional workflow runner. The concrete default smoke path still runs locally.
 
 ## Real Model Client
 
-Milestone 4 adds a thin OpenAI-compatible client for Microsoft Foundry/Azure OpenAI inference endpoints. It is optional; the default smoke test still uses `generator_provider: fake`.
+Milestone 4 adds a thin OpenAI-compatible client for Microsoft Foundry/Azure OpenAI inference endpoints. Milestone 6 adds a Responses API path with Pydantic-backed structured outputs for GPT-5-family deployments. The real client is optional; the default smoke test still uses `generator_provider: fake`.
 
 Install the optional dependencies only when running against a real deployment:
 
@@ -45,13 +45,22 @@ Install the optional dependencies only when running against a real deployment:
 uv sync --python 3.13 --extra dev --extra foundry
 ```
 
-Set real model values through environment variables:
+Set real model values through environment variables or a local `.env` file:
 
 ```bash
 export FOUNDRY_GENERATOR_BASE_URL="https://<resource>.openai.azure.com/openai/v1/"
 export FOUNDRY_GENERATOR_DEPLOYMENT="<deployment-name>"
+export FOUNDRY_GENERATOR_API="responses"
+export FOUNDRY_GENERATOR_MAX_OUTPUT_TOKENS="2000"
+export FOUNDRY_GENERATOR_RESPONSE_FORMAT="structured"
 export AZURE_INFERENCE_CREDENTIAL="<api-key>"
 ```
+
+`FOUNDRY_GENERATOR_BASE_URL` should be the base `/openai/v1/` endpoint. If a copied endpoint ends in `/responses` or `/chat/completions`, the client normalizes it back to the base URL before creating the SDK client.
+
+`FOUNDRY_GENERATOR_RESPONSE_FORMAT=structured` is the recommended GPT-5 path. It uses the OpenAI SDK `responses.parse(..., text_format=...)` flow so Pydantic generates the schema and parses the result. `json_object` remains available only as a compatibility fallback.
+
+With `generator_auth_mode: api_key`, Azure CLI login is not required. Azure login is only needed if you switch the config to `generator_auth_mode: azure_default_credential` or start provisioning/managing Azure resources.
 
 Then run the real-client stuffing smoke config:
 

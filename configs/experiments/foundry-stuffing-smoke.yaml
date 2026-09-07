@@ -17,12 +17,13 @@ dataset:
 
 models:
   generator_provider: foundry
+  generator_api: ${FOUNDRY_GENERATOR_API:-responses}
   generator_base_url: ${FOUNDRY_GENERATOR_BASE_URL}
   generator_deployment: ${FOUNDRY_GENERATOR_DEPLOYMENT}
   generator_api_key_env: AZURE_INFERENCE_CREDENTIAL
   generator_auth_mode: api_key
-  generator_temperature: 0.0
-  generator_response_format: json_object
+  generator_max_output_tokens: ${FOUNDRY_GENERATOR_MAX_OUTPUT_TOKENS:-2000}
+  generator_response_format: ${FOUNDRY_GENERATOR_RESPONSE_FORMAT:-structured}
 
 shared_pipeline:
   segment_tokens: 6000
