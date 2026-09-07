@@ -1,0 +1,79 @@
+experiment:
+  id: multilexsum-casefile-smoke
+  mode: controlled_ablation
+  seed: 42
+  query_repetitions: 1
+
+dataset:
+  adapter: multilexsum
+  split: test
+  case_manifest: benchmarks/multilexsum/case-manifest.json
+  question_set: benchmarks/multilexsum/questions.json
+  capabilities:
+    has_expected_answers: true
+    has_relevant_documents: true
+    has_relevant_segments: false
+    has_evidence_spans: false
+    has_reference_summaries: true
+  options:
+    config_name: v20230518
+    segment_tokens: 1200
+    segment_overlap_tokens: 120
+
+models:
+  generator_provider: fake
+  generator_response_format: structured
+
+shared_pipeline:
+  segment_tokens: 6000
+  segment_overlap_tokens: 250
+  selected_documents: 2
+  retrieved_segments: 8
+
+workflow:
+  runner: local
+
+answering:
+  mode: generated
+
+systems:
+  - flat_vector
+  - stuffing
+  - map_reduce
+  - refine
+  - hierarchical_map
+  - outline_then_fill
+  - agentic_map
+
+evaluation:
+  local:
+    - map_schema_validity
+    - map_source_reference_validity
+    - map_compression_ratio
+    - map_completion_rate
+    - document_recall_at_1
+    - document_recall_at_3
+    - mrr
+    - required_document_coverage
+    - citation_precision
+    - citation_recall
+    - invalid_citation_rate
+    - query_duration_ms
+    - tool_calls
+  foundry:
+    enabled: true
+    dataset_path: evaluations/foundry/dataset.jsonl
+    manifest_path: evaluations/foundry/manifest.json
+    result_path: evaluations/foundry/managed-result.json
+    evaluation_level: turn
+    evaluators:
+      - groundedness
+      - relevance
+      - retrieval
+      - document_retrieval
+    managed_evaluators:
+      - f1
+      - rouge
+
+storage:
+  artifacts_dir: artifacts

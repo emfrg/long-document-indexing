@@ -1,0 +1,21 @@
+{
+  "id": "multilexsum-casefile-summary",
+  "metadata": {
+    "task": "case_file_summarization",
+    "gold_source": "expert_summary"
+  },
+  "templates": [
+    {
+      "id_suffix": "long_summary",
+      "summary_length": "long",
+      "query": "Write a detailed summary of this civil-rights litigation case file. Include the parties, claims, procedural history, major rulings or settlement terms, and outcome when available.",
+      "tags": [
+        "legal",
+        "multi_document_summarization"
+      ],
+      "metadata": {
+        "answer_style": "long_expert_summary"
+      }
+    }
+  ]
+}

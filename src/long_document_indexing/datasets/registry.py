@@ -26,6 +26,7 @@ def create_dataset_adapter(config: DatasetConfig) -> DatasetAdapter:
             revision=config.revision,
             case_manifest=config.case_manifest,
             capabilities=config.capabilities,
+            options=config.options,
         )
 
     raise ValueError(f"unknown dataset adapter: {config.adapter}")

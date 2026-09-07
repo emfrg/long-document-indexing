@@ -1,0 +1,8 @@
+{
+  "description": "Small deterministic smoke slice: first 5 cases from the selected Multi-LexSum split.",
+  "max_cases": 5,
+  "max_source_documents": 8,
+  "selection_policy": "first_n_from_split",
+  "source_dataset": "allenai/multi_lexsum",
+  "source_dataset_config": "v20230518"
+}
