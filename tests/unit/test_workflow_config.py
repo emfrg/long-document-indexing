@@ -71,6 +71,9 @@ def test_foundry_evaluation_config_rejects_non_artifact_relative_paths() -> None
     with pytest.raises(ValidationError, match="artifact-relative"):
         FoundryEvaluationConfig.model_validate({"manifest_path": "../foundry.json"})
 
+    with pytest.raises(ValidationError, match="artifact-relative"):
+        FoundryEvaluationConfig.model_validate({"result_path": "/tmp/result.json"})
+
 
 def test_foundry_evaluation_config_rejects_blank_or_duplicate_evaluators() -> None:
     with pytest.raises(ValidationError, match="blank"):
@@ -78,6 +81,17 @@ def test_foundry_evaluation_config_rejects_blank_or_duplicate_evaluators() -> No
 
     with pytest.raises(ValidationError, match="duplicates"):
         FoundryEvaluationConfig.model_validate({"evaluators": ["relevance", "relevance"]})
+
+    with pytest.raises(ValidationError, match="duplicates"):
+        FoundryEvaluationConfig.model_validate({"managed_evaluators": ["f1", "f1"]})
+
+
+def test_foundry_evaluation_config_rejects_blank_project_or_tags() -> None:
+    with pytest.raises(ValidationError, match="blank"):
+        FoundryEvaluationConfig.model_validate({"azure_ai_project": " "})
+
+    with pytest.raises(ValidationError, match="blank"):
+        FoundryEvaluationConfig.model_validate({"tags": {"": "value"}})
 
 
 def test_foundry_evaluation_config_rejects_conversation_level_for_now() -> None:

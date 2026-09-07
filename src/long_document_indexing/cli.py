@@ -19,6 +19,8 @@ from long_document_indexing.domain.maps import IndexArtifact
 from long_document_indexing.domain.runs import MetricRecord, RagRunRecord, UsageRecord
 from long_document_indexing.evaluation.foundry import (
     FoundryEvaluationExport,
+    build_foundry_managed_evaluation_plan,
+    run_foundry_managed_evaluation,
     write_foundry_evaluation_export,
 )
 from long_document_indexing.evaluation.local.maps import evaluate_index_artifact
@@ -60,6 +62,10 @@ ForceFlag = Annotated[
 DryRunBudgetFlag = Annotated[
     bool,
     typer.Option("--dry-run-budget", help="Print run-control budget status without executing."),
+]
+DryRunFlag = Annotated[
+    bool,
+    typer.Option("--dry-run", help="Print the planned operation without executing it."),
 ]
 
 
@@ -118,6 +124,13 @@ def export_foundry_eval(config: ConfigPath) -> None:
     """Export run records as a Foundry-ready JSONL evaluation dataset."""
 
     _export_foundry_eval(load_experiment_config(config))
+
+
+@app.command("evaluate-foundry-managed")
+def evaluate_foundry_managed(config: ConfigPath, dry_run: DryRunFlag = False) -> None:
+    """Run Azure AI Evaluation SDK over the exported Foundry dataset."""
+
+    _evaluate_foundry_managed(load_experiment_config(config), dry_run=dry_run)
 
 
 @app.command()
@@ -474,6 +487,8 @@ def _report(config: ExperimentConfig) -> None:
         query_usage=_load_usage_events(store, "costs/query-usage.jsonl"),
         foundry_manifest=_load_foundry_manifest(config, store),
         foundry_manifest_path=_foundry_manifest_path(config, store),
+        foundry_managed_result=_load_foundry_managed_result(config, store),
+        foundry_managed_result_path=_foundry_managed_result_path(config, store),
     )
 
     _write_csv(
@@ -553,6 +568,42 @@ def _export_foundry_eval(
     )
     typer.echo(f"Wrote Foundry evaluation manifest to {export.manifest_path}")
     return export
+
+
+def _evaluate_foundry_managed(
+    config: ExperimentConfig,
+    *,
+    dry_run: bool = False,
+) -> None:
+    store = _artifact_store(config)
+    _ensure_foundry_export(config, store)
+    if dry_run:
+        plan = build_foundry_managed_evaluation_plan(config=config, store=store)
+        store.write_json("evaluations/foundry/managed-plan.json", plan)
+        typer.echo(f"Planned Foundry managed evaluation for {plan['evaluation_name']}")
+        typer.echo(f"Dataset: {plan['dataset_path']}")
+        typer.echo(f"Manifest: {plan['manifest_path']}")
+        typer.echo(f"Result: {plan['result_path']}")
+        typer.echo(f"Azure AI project: {plan['azure_ai_project']}")
+        typer.echo(f"Managed evaluators: {', '.join(plan['managed_evaluators'])}")
+        typer.echo(
+            "Wrote managed evaluation plan to "
+            f"{store.path('evaluations/foundry/managed-plan.json')}"
+        )
+        return
+
+    result = run_foundry_managed_evaluation(config=config, store=store)
+    typer.echo(f"Wrote Foundry managed evaluation result to {result.result_path}")
+    if result.studio_url:
+        typer.echo(f"Foundry URL: {result.studio_url}")
+
+
+def _ensure_foundry_export(config: ExperimentConfig, store: ArtifactStore) -> None:
+    dataset_path = store.experiment_dir / config.evaluation.foundry.dataset_path
+    manifest_path = store.experiment_dir / config.evaluation.foundry.manifest_path
+    if dataset_path.exists() and manifest_path.exists():
+        return
+    _export_foundry_eval(config, store=store)
 
 
 def _load_dataset(config: ExperimentConfig) -> LoadedDataset:
@@ -796,6 +847,27 @@ def _foundry_manifest_path(config: ExperimentConfig, store: ArtifactStore) -> st
     if not manifest_path.exists():
         return None
     return str(manifest_path)
+
+
+def _load_foundry_managed_result(
+    config: ExperimentConfig,
+    store: ArtifactStore,
+) -> dict | None:
+    result_relative_path = config.evaluation.foundry.result_path
+    result_path = store.experiment_dir / result_relative_path
+    if not result_path.exists():
+        return None
+    return store.read_json(result_relative_path)
+
+
+def _foundry_managed_result_path(
+    config: ExperimentConfig,
+    store: ArtifactStore,
+) -> str | None:
+    result_path = store.experiment_dir / config.evaluation.foundry.result_path
+    if not result_path.exists():
+        return None
+    return str(result_path)
 
 
 def _validate_loaded_dataset(loaded: LoadedDataset) -> None:

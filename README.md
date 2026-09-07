@@ -110,7 +110,24 @@ You can also export from existing run artifacts:
 uv run --python 3.13 --no-editable --reinstall-package long-document-indexing ldi export-foundry-eval --config configs/experiments/foundry-eval-export-smoke.yaml
 ```
 
-This milestone does not run a cloud evaluation. Use the generated JSONL and manifest when uploading a dataset or configuring a later Foundry SDK/portal evaluation run. Azure login is not required for the local export.
+This milestone does not run a cloud evaluation. Azure login is not required for the local export.
+
+## Foundry Managed Evaluation
+
+Milestone 13 adds a thin Azure AI Evaluation SDK execution path over the exported JSONL dataset. Inspect the exact SDK call shape first:
+
+```bash
+uv run --python 3.13 --extra foundry --no-editable --reinstall-package long-document-indexing ldi evaluate-foundry-managed --config configs/experiments/enterprise-thin-slice.yaml --dry-run
+```
+
+The dry run writes `evaluations/foundry/managed-plan.json` and makes no cloud call. To log results to a Foundry project, set the project endpoint:
+
+```bash
+export FOUNDRY_EVALUATION_PROJECT_ENDPOINT="https://<resource>.services.ai.azure.com/api/projects/<project-name>"
+uv run --python 3.13 --extra foundry --no-editable --reinstall-package long-document-indexing ldi evaluate-foundry-managed --config configs/experiments/enterprise-thin-slice.yaml
+```
+
+The default managed evaluators are `f1` and `rouge`, which score `response` against `ground_truth`. If the SDK asks for Azure authentication when logging to a project, run `az login`. `azd` is only needed for provisioning or Foundry hosted-agent workflows, not for local export or dry-run planning.
 
 ## Multi-System Real Benchmark
 

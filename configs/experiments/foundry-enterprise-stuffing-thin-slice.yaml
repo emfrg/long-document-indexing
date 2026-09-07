@@ -64,12 +64,16 @@ evaluation:
     enabled: true
     dataset_path: evaluations/foundry/dataset.jsonl
     manifest_path: evaluations/foundry/manifest.json
+    result_path: evaluations/foundry/managed-result.json
     evaluation_level: turn
     evaluators:
       - groundedness
       - relevance
       - retrieval
       - document_retrieval
+    managed_evaluators:
+      - f1
+      - rouge
 
 storage:
   artifacts_dir: artifacts

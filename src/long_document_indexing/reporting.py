@@ -102,6 +102,10 @@ class FoundryExportSummary(BaseModel):
     row_count: int = 0
     systems: list[str] = Field(default_factory=list)
     evaluators: list[str] = Field(default_factory=list)
+    managed_result_path: str | None = None
+    managed_row_count: int = 0
+    managed_metrics: dict[str, float] = Field(default_factory=dict)
+    managed_studio_url: str | None = None
 
 
 class ReportBundle(BaseModel):
@@ -122,11 +126,18 @@ def build_report_bundle(
     query_usage: Iterable[UsageEvent],
     foundry_manifest: Mapping[str, Any] | None = None,
     foundry_manifest_path: str | None = None,
+    foundry_managed_result: Mapping[str, Any] | None = None,
+    foundry_managed_result_path: str | None = None,
 ) -> ReportBundle:
     metric_rows = summarize_metrics(metrics)
     usage_rows = summarize_usage_events([*index_usage, *query_usage])
     run_status_rows = summarize_run_status(run_records)
-    foundry_export = summarize_foundry_export(foundry_manifest, foundry_manifest_path)
+    foundry_export = summarize_foundry_export(
+        foundry_manifest,
+        foundry_manifest_path,
+        foundry_managed_result=foundry_managed_result,
+        foundry_managed_result_path=foundry_managed_result_path,
+    )
     system_rows = summarize_systems(
         metric_rows=metric_rows,
         usage_rows=usage_rows,
@@ -210,9 +221,16 @@ def summarize_run_status(records: Iterable[RagRunRecord]) -> list[RunStatusSumma
 def summarize_foundry_export(
     manifest: Mapping[str, Any] | None,
     manifest_path: str | None,
+    *,
+    foundry_managed_result: Mapping[str, Any] | None = None,
+    foundry_managed_result_path: str | None = None,
 ) -> FoundryExportSummary:
+    managed_summary = _managed_result_summary(
+        foundry_managed_result,
+        foundry_managed_result_path,
+    )
     if not manifest:
-        return FoundryExportSummary()
+        return FoundryExportSummary(**managed_summary)
 
     row_count = manifest.get("row_count", 0)
     systems = manifest.get("systems", [])
@@ -224,6 +242,7 @@ def summarize_foundry_export(
         row_count=int(row_count) if row_count is not None else 0,
         systems=sorted(str(item) for item in systems) if isinstance(systems, list) else [],
         evaluators=[str(item) for item in evaluators] if isinstance(evaluators, list) else [],
+        **managed_summary,
     )
 
 
@@ -525,16 +544,69 @@ def render_markdown_report(bundle: ReportBundle) -> str:
 
 def _foundry_export_markdown(summary: FoundryExportSummary) -> str:
     if not summary.enabled:
+        if summary.managed_result_path:
+            return _foundry_managed_markdown(summary)
         return "No Foundry export manifest was found."
-    return "\n".join(
-        [
-            f"- Dataset: `{summary.dataset_path}`",
-            f"- Manifest: `{summary.manifest_path}`",
-            f"- Rows: `{summary.row_count}`",
-            f"- Systems: `{', '.join(summary.systems)}`",
-            f"- Evaluators: `{', '.join(summary.evaluators)}`",
-        ]
-    )
+    lines = [
+        f"- Dataset: `{summary.dataset_path}`",
+        f"- Manifest: `{summary.manifest_path}`",
+        f"- Rows: `{summary.row_count}`",
+        f"- Systems: `{', '.join(summary.systems)}`",
+        f"- Evaluators: `{', '.join(summary.evaluators)}`",
+    ]
+    if summary.managed_result_path:
+        lines.extend(["", _foundry_managed_markdown(summary)])
+    return "\n".join(lines)
+
+
+def _foundry_managed_markdown(summary: FoundryExportSummary) -> str:
+    lines = [
+        "Managed evaluation:",
+        f"- Result: `{summary.managed_result_path}`",
+        f"- Rows: `{summary.managed_row_count}`",
+    ]
+    if summary.managed_studio_url:
+        lines.append(f"- Studio URL: `{summary.managed_studio_url}`")
+    if summary.managed_metrics:
+        lines.append("- Metrics:")
+        lines.extend(
+            f"  - `{name}`: `{_format_float(value)}`"
+            for name, value in sorted(summary.managed_metrics.items())
+        )
+    return "\n".join(lines)
+
+
+def _managed_result_summary(
+    result: Mapping[str, Any] | None,
+    result_path: str | None,
+) -> dict[str, Any]:
+    if not result:
+        return {
+            "managed_result_path": None,
+            "managed_row_count": 0,
+            "managed_metrics": {},
+            "managed_studio_url": None,
+        }
+    row_count = result.get("row_count", 0)
+    metrics = result.get("metrics", {})
+    return {
+        "managed_result_path": result_path,
+        "managed_row_count": int(row_count) if row_count is not None else 0,
+        "managed_metrics": _float_metrics(metrics),
+        "managed_studio_url": _optional_str(result.get("studio_url")),
+    }
+
+
+def _float_metrics(metrics: Any) -> dict[str, float]:
+    if not isinstance(metrics, Mapping):
+        return {}
+    normalized: dict[str, float] = {}
+    for key, value in metrics.items():
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, int | float):
+            normalized[str(key)] = float(value)
+    return normalized
 
 
 def _issues_markdown(rows: Iterable[SystemSummaryRow]) -> str:

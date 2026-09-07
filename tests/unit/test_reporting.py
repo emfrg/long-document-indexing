@@ -50,6 +50,12 @@ def test_report_bundle_summarizes_quality_usage_and_foundry_export() -> None:
             "evaluators": ["groundedness"],
         },
         foundry_manifest_path="/tmp/manifest.json",
+        foundry_managed_result={
+            "row_count": 3,
+            "metrics": {"f1.f1_score": 0.8, "rouge.rouge": 0.7},
+            "studio_url": "https://ai.azure.com/project/evaluations/run",
+        },
+        foundry_managed_result_path="/tmp/managed-result.json",
     )
 
     alpha = _system(bundle.system_rows, "alpha")
@@ -68,6 +74,16 @@ def test_report_bundle_summarizes_quality_usage_and_foundry_export() -> None:
     assert bundle.foundry_export.enabled is True
     assert bundle.foundry_export.row_count == 3
     assert bundle.foundry_export.systems == ["alpha", "beta"]
+    assert bundle.foundry_export.managed_result_path == "/tmp/managed-result.json"
+    assert bundle.foundry_export.managed_row_count == 3
+    assert bundle.foundry_export.managed_metrics == {
+        "f1.f1_score": 0.8,
+        "rouge.rouge": 0.7,
+    }
+
+    markdown = render_markdown_report(bundle)
+    assert "Managed evaluation:" in markdown
+    assert "`f1.f1_score`: `0.8000`" in markdown
 
 
 def test_report_renderers_keep_legacy_metric_csv_and_add_scorecard_rows() -> None:

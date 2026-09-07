@@ -167,6 +167,9 @@ class FoundryEvaluationConfig(BaseModel):
     enabled: bool = False
     dataset_path: Path = Path("evaluations/foundry/dataset.jsonl")
     manifest_path: Path = Path("evaluations/foundry/manifest.json")
+    result_path: Path = Path("evaluations/foundry/result.json")
+    azure_ai_project: str | None = None
+    evaluation_name: str | None = None
     evaluation_level: Literal["turn"] = "turn"
     evaluators: list[str] = Field(
         default_factory=lambda: [
@@ -176,8 +179,11 @@ class FoundryEvaluationConfig(BaseModel):
             "document_retrieval",
         ]
     )
+    managed_evaluators: list[str] = Field(default_factory=lambda: ["f1", "rouge"])
+    fail_on_evaluator_errors: bool = False
+    tags: dict[str, str] = Field(default_factory=dict)
 
-    @field_validator("dataset_path", "manifest_path")
+    @field_validator("dataset_path", "manifest_path", "result_path")
     @classmethod
     def _must_be_artifact_relative_path(cls, value: Path) -> Path:
         if value.is_absolute() or any(part == ".." for part in value.parts):
@@ -186,7 +192,14 @@ class FoundryEvaluationConfig(BaseModel):
             raise ValueError("path must not be blank")
         return value
 
-    @field_validator("evaluators")
+    @field_validator("azure_ai_project", "evaluation_name")
+    @classmethod
+    def _optional_strings_must_not_be_blank(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("value must not be blank")
+        return value
+
+    @field_validator("evaluators", "managed_evaluators")
     @classmethod
     def _evaluators_must_be_unique_and_non_blank(cls, value: list[str]) -> list[str]:
         normalized = [item.strip() for item in value]
@@ -195,6 +208,14 @@ class FoundryEvaluationConfig(BaseModel):
         if len(normalized) != len(set(normalized)):
             raise ValueError("evaluators must not contain duplicates")
         return normalized
+
+    @field_validator("tags")
+    @classmethod
+    def _tags_must_not_be_blank(cls, value: dict[str, str]) -> dict[str, str]:
+        for key, tag_value in value.items():
+            if not key.strip() or not tag_value.strip():
+                raise ValueError("tags must not contain blank keys or values")
+        return value
 
 
 class EvaluationConfig(BaseModel):
