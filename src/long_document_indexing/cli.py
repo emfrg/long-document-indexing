@@ -23,7 +23,7 @@ from long_document_indexing.systems.registry import create_system
 from long_document_indexing.telemetry.usage import UsageEvent, UsageLedger
 from long_document_indexing.workflows.common_indexing import run_indexing_workflow
 from long_document_indexing.workflows.common_query import run_query_workflow
-from long_document_indexing.workflows.execution import LocalWorkflowRunner
+from long_document_indexing.workflows.execution import LocalWorkflowRunner, MafWorkflowRunner
 
 app = typer.Typer(no_args_is_help=True)
 ConfigPath = Annotated[Path, typer.Option("--config", "-c")]
@@ -229,11 +229,19 @@ def _services(config: ExperimentConfig) -> Services:
     return Services(
         artifact_store=store,
         retrieval_backend=retrieval_backend,
-        workflow_runner=LocalWorkflowRunner(),
+        workflow_runner=_workflow_runner(config),
         usage_ledger=UsageLedger(),
         prompt_loader=PromptLoader(Path("prompts")),
         generator_client=create_text_generation_client(config.models),
     )
+
+
+def _workflow_runner(config: ExperimentConfig):
+    if config.workflow.runner == "local":
+        return LocalWorkflowRunner()
+    if config.workflow.runner == "maf":
+        return MafWorkflowRunner()
+    raise ValueError(f"unsupported workflow runner: {config.workflow.runner}")
 
 
 def _load_index_artifacts(store: ArtifactStore) -> list[IndexArtifact]:

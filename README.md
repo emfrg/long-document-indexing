@@ -58,3 +58,12 @@ Then run the real-client stuffing smoke config:
 ```bash
 uv run --python 3.13 --extra foundry --no-editable --reinstall-package long-document-indexing ldi run --config configs/experiments/foundry-stuffing-smoke.yaml
 ```
+
+## MAF Workflow Runner
+
+Milestone 5 adds an optional Microsoft Agent Framework functional workflow runner. It does not require Azure resources when used with the fake generator.
+
+```bash
+uv sync --python 3.13 --extra dev --extra maf
+uv run --python 3.13 --extra maf --no-editable --reinstall-package long-document-indexing ldi run --config configs/experiments/maf-stuffing-smoke.yaml
+```
