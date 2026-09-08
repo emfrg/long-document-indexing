@@ -2,12 +2,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from long_document_indexing.config import SharedPipelineConfig
 from long_document_indexing.domain.benchmark import BenchmarkItem, GroundTruth
 from long_document_indexing.domain.corpus import Corpus, Document, Segment
 from long_document_indexing.domain.maps import DocumentMap, MapEntry, SourceReference
 from long_document_indexing.domain.runs import UsageRecord
 from long_document_indexing.evaluation.local.maps import evaluate_index_artifact
+from long_document_indexing.models.base import GenerationRequest, GenerationResponse
 from long_document_indexing.models.fake import FakeTextGenerationClient
 from long_document_indexing.prompts import PromptLoader
 from long_document_indexing.retrieval.local_vector import LocalVectorBackend
@@ -24,7 +27,7 @@ from long_document_indexing.systems.stuffing import StuffingSystem
 from long_document_indexing.telemetry.usage import UsageLedger
 from long_document_indexing.workflows.common_indexing import run_indexing_workflow
 from long_document_indexing.workflows.common_query import run_query_workflow
-from long_document_indexing.workflows.execution import LocalWorkflowRunner
+from long_document_indexing.workflows.execution import LocalWorkflowRunner, WorkflowExecutionError
 
 
 async def test_map_systems_build_maps_and_answer_queries(tmp_path) -> None:
@@ -197,7 +200,62 @@ async def test_map_build_normalizes_invalid_source_references_before_persistence
     assert metrics[0].value == 1.0
 
 
-def _services(tmp_path, *, answering_mode: str = "extractive") -> Services:
+async def test_map_reduce_reuses_partial_checkpoints_after_failed_indexing(tmp_path) -> None:
+    corpus = _single_document_corpus()
+    first_client = _FlakyMapReduceClient(fail_on_document_map_call=2)
+    first_services = _services(tmp_path, generator_client=first_client)
+
+    with pytest.raises(WorkflowExecutionError, match="planned map failure"):
+        await run_indexing_workflow(
+            system=MapReduceSystem(),
+            corpus=corpus,
+            services=first_services,
+            pipeline=SharedPipelineConfig(selected_documents=1, retrieved_segments=2),
+            experiment_id="exp",
+        )
+
+    checkpoint_dir = tmp_path / "artifacts" / "exp" / "indexes" / "map_reduce" / "checkpoints"
+    assert len(list(checkpoint_dir.glob("*/completed/*.json"))) == 1
+    assert len(list(checkpoint_dir.glob("*/failures/*.json"))) == 1
+    assert first_client.document_map_segment_ids == ["alpha_s1", "alpha_s2"]
+
+    progress_messages: list[str] = []
+    second_client = _FlakyMapReduceClient()
+    second_services = _services(
+        tmp_path,
+        generator_client=second_client,
+        resume_checkpoints=True,
+        progress=progress_messages.append,
+    )
+
+    artifact = await run_indexing_workflow(
+        system=MapReduceSystem(),
+        corpus=corpus,
+        services=second_services,
+        pipeline=SharedPipelineConfig(selected_documents=1, retrieved_segments=2),
+        experiment_id="exp",
+    )
+
+    assert second_client.document_map_segment_ids == ["alpha_s2"]
+    assert second_client.reduce_calls == 1
+    assert artifact.build_metadata["usage"]["model_calls"] == 3
+    assert artifact.build_metadata["strategy_metadata"]["checkpointing"] == {
+        "partial_reused": 1,
+        "partial_written": 1,
+        "reduction_reused": 0,
+        "reduction_written": 1,
+    }
+    assert any("reused checkpoint" in message for message in progress_messages)
+
+
+def _services(
+    tmp_path,
+    *,
+    answering_mode: str = "extractive",
+    generator_client=None,
+    resume_checkpoints: bool = False,
+    progress=None,
+) -> Services:
     store = ArtifactStore(tmp_path / "artifacts", "exp")
     return Services(
         artifact_store=store,
@@ -206,7 +264,9 @@ def _services(tmp_path, *, answering_mode: str = "extractive") -> Services:
         usage_ledger=UsageLedger(),
         prompt_loader=PromptLoader(Path("prompts")),
         answering_mode=answering_mode,
-        generator_client=FakeTextGenerationClient(),
+        generator_client=generator_client or FakeTextGenerationClient(),
+        resume_checkpoints=resume_checkpoints,
+        progress=progress,
     )
 
 
@@ -246,6 +306,51 @@ def _corpus() -> Corpus:
             ),
         ],
     )
+
+
+def _single_document_corpus() -> Corpus:
+    return Corpus(
+        id="corpus",
+        documents=[
+            Document(
+                id="doc_alpha",
+                corpus_id="corpus",
+                segments=[
+                    Segment(
+                        id="alpha_s1",
+                        document_id="doc_alpha",
+                        order=1,
+                        text="Alpha renewal approval from the board.",
+                    ),
+                    Segment(
+                        id="alpha_s2",
+                        document_id="doc_alpha",
+                        order=2,
+                        text="Finance expected support cost reductions.",
+                    ),
+                ],
+            ),
+        ],
+    )
+
+
+class _FlakyMapReduceClient:
+    def __init__(self, fail_on_document_map_call: int | None = None) -> None:
+        self.fail_on_document_map_call = fail_on_document_map_call
+        self.document_map_segment_ids: list[str] = []
+        self.reduce_calls = 0
+        self._fake = FakeTextGenerationClient()
+
+    async def generate(self, request: GenerationRequest) -> GenerationResponse:
+        task = request.metadata.get("task")
+        if task == "document_map":
+            segment_id = str(request.metadata["segments"][0]["id"])
+            self.document_map_segment_ids.append(segment_id)
+            if len(self.document_map_segment_ids) == self.fail_on_document_map_call:
+                raise RuntimeError("planned map failure")
+        elif task == "reduce_document_maps":
+            self.reduce_calls += 1
+        return await self._fake.generate(request)
 
 
 class _BadReferenceSystem(DocumentMapSystemBase):

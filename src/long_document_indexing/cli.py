@@ -630,6 +630,8 @@ def _services(config: ExperimentConfig) -> Services:
         prompt_loader=PromptLoader(Path("prompts")),
         answering_mode=config.answering.mode,
         generator_client=create_text_generation_client(config.models),
+        resume_checkpoints=config.run_control.resume and not config.run_control.force,
+        progress=typer.echo,
     )
 
 

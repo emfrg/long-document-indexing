@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
 
@@ -26,3 +27,9 @@ class Services:
     generator_client: TextGenerationClient | None = None
     embedding_client: object | None = None
     judge_client: object | None = None
+    resume_checkpoints: bool = False
+    progress: Callable[[str], None] | None = None
+
+    def emit_progress(self, message: str) -> None:
+        if self.progress is not None:
+            self.progress(message)
