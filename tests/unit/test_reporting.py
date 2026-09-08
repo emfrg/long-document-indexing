@@ -11,6 +11,7 @@ from long_document_indexing.domain.runs import (
 from long_document_indexing.reporting import (
     build_report_bundle,
     legacy_metric_csv_rows,
+    metric_group,
     render_markdown_report,
     system_summary_csv_rows,
 )
@@ -107,6 +108,25 @@ def test_report_renderers_keep_legacy_metric_csv_and_add_scorecard_rows() -> Non
     assert "## System Scorecard" in markdown
     assert "## Metric Means" in markdown
     assert "No Foundry export manifest was found." in markdown
+
+
+def test_report_scores_answer_reference_metrics_without_requiring_perfection() -> None:
+    bundle = build_report_bundle(
+        metrics=[
+            _metric("alpha", "answer_reference_token_f1", 0.45, level="answer"),
+            _metric("alpha", "invalid_citation_rate", 0.0, level="answer"),
+        ],
+        run_records=[_run_record("alpha", status="succeeded")],
+        index_usage=[],
+        query_usage=[],
+    )
+
+    row = _system(bundle.system_rows, "alpha")
+
+    assert metric_group("answer_reference_token_f1") == "answer"
+    assert row.answer_score == pytest.approx(0.725)
+    assert row.quality_score == pytest.approx(0.725)
+    assert "answer_reference_token_f1=0.4500" not in row.issues
 
 
 def _metric(system_id: str, name: str, value: float, *, level: str) -> MetricRecord:

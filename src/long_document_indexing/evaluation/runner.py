@@ -6,6 +6,10 @@ from long_document_indexing.domain.benchmark import BenchmarkItem
 from long_document_indexing.domain.corpus import Corpus
 from long_document_indexing.domain.runs import MetricRecord, RagRunRecord
 from long_document_indexing.evaluation.local.answers import (
+    answer_reference_similarity,
+    answer_reference_token_f1,
+    answer_reference_token_precision,
+    answer_reference_token_recall,
     citation_precision,
     citation_recall,
     invalid_citation_rate,
@@ -118,6 +122,26 @@ def _calculate_metric(
 
     if metric_name == "invalid_citation_rate":
         return invalid_citation_rate(record.citations, corpus), "answer"
+
+    if metric_name == "answer_reference_similarity":
+        if not (truth.reference_summary or truth.expected_answer):
+            return None
+        return answer_reference_similarity(record.answer, truth), "answer"
+
+    if metric_name == "answer_reference_token_precision":
+        if not (truth.reference_summary or truth.expected_answer):
+            return None
+        return answer_reference_token_precision(record.answer, truth), "answer"
+
+    if metric_name == "answer_reference_token_recall":
+        if not (truth.reference_summary or truth.expected_answer):
+            return None
+        return answer_reference_token_recall(record.answer, truth), "answer"
+
+    if metric_name == "answer_reference_token_f1":
+        if not (truth.reference_summary or truth.expected_answer):
+            return None
+        return answer_reference_token_f1(record.answer, truth), "answer"
 
     if metric_name == "query_duration_ms":
         return record.usage.duration_ms, "efficiency"

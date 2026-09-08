@@ -52,12 +52,10 @@ evaluation:
     - map_source_reference_validity
     - map_compression_ratio
     - map_completion_rate
-    - document_recall_at_1
-    - document_recall_at_3
-    - mrr
-    - required_document_coverage
-    - citation_precision
-    - citation_recall
+    - answer_reference_similarity
+    - answer_reference_token_precision
+    - answer_reference_token_recall
+    - answer_reference_token_f1
     - invalid_citation_rate
     - query_duration_ms
     - tool_calls
@@ -70,8 +68,6 @@ evaluation:
     evaluators:
       - groundedness
       - relevance
-      - retrieval
-      - document_retrieval
     managed_evaluators:
       - f1
       - rouge

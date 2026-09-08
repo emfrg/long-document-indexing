@@ -186,6 +186,21 @@ def test_multilexsum_casefile_smoke_config_is_benchmark_ready() -> None:
     assert adapter.segment_overlap_tokens == 120
     assert adapter.trust_remote_code is True
     assert config.answering.mode == "generated"
+    assert config.evaluation.local == [
+        "map_schema_validity",
+        "map_source_reference_validity",
+        "map_compression_ratio",
+        "map_completion_rate",
+        "answer_reference_similarity",
+        "answer_reference_token_precision",
+        "answer_reference_token_recall",
+        "answer_reference_token_f1",
+        "invalid_citation_rate",
+        "query_duration_ms",
+        "tool_calls",
+    ]
+    assert config.evaluation.foundry.evaluators == ["groundedness", "relevance"]
+    assert config.evaluation.foundry.managed_evaluators == ["f1", "rouge"]
     assert config.systems == [
         "flat_vector",
         "stuffing",

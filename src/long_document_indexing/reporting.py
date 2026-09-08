@@ -19,7 +19,15 @@ ROUTING_METRICS = {
     "required_document_coverage",
 }
 RETRIEVAL_METRICS = {"segment_recall_at_4"}
-ANSWER_METRICS = {"citation_precision", "citation_recall", "invalid_citation_rate"}
+ANSWER_METRICS = {
+    "answer_reference_similarity",
+    "answer_reference_token_f1",
+    "answer_reference_token_precision",
+    "answer_reference_token_recall",
+    "citation_precision",
+    "citation_recall",
+    "invalid_citation_rate",
+}
 MAP_QUALITY_METRICS = {
     "map_schema_validity",
     "map_source_reference_validity",
@@ -27,6 +35,12 @@ MAP_QUALITY_METRICS = {
 }
 LOWER_IS_BETTER_METRICS = {"invalid_citation_rate", "query_duration_ms", "tool_calls"}
 EFFICIENCY_METRICS = {"query_duration_ms", "tool_calls"}
+QUALITY_ISSUE_THRESHOLDS = {
+    "answer_reference_similarity": 0.2,
+    "answer_reference_token_f1": 0.15,
+    "answer_reference_token_precision": 0.2,
+    "answer_reference_token_recall": 0.1,
+}
 
 
 class MetricSummaryRow(BaseModel):
@@ -314,7 +328,7 @@ def metric_group(metric_name: str) -> MetricGroup:
         return "routing"
     if metric_name in RETRIEVAL_METRICS or metric_name.startswith("segment_recall_at_"):
         return "retrieval"
-    if metric_name in ANSWER_METRICS:
+    if metric_name in ANSWER_METRICS or metric_name.startswith("answer_reference_"):
         return "answer"
     if metric_name.startswith("map_"):
         return "map"
@@ -373,7 +387,8 @@ def system_issues(
             if row.metric == "invalid_citation_rate" and row.mean > 0.0:
                 issues.append(f"{row.metric}={row.mean:.4f}")
             continue
-        if is_quality_metric(row.metric) and row.mean < 1.0:
+        threshold = QUALITY_ISSUE_THRESHOLDS.get(row.metric, 1.0)
+        if is_quality_metric(row.metric) and row.mean < threshold:
             issues.append(f"{row.metric}={row.mean:.4f}")
     return issues
 

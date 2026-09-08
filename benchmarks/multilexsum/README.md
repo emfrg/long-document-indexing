@@ -17,3 +17,7 @@ The benchmark questions in this directory are template questions. At load time, 
 adapter expands each template once per selected case and uses the expert Multi-LexSum
 summary as both `expected_answer` and `reference_summary`.
 
+Because these generated questions ask for whole-case summaries, every loaded source
+document is treated as relevant. Document-recall metrics are therefore less useful than
+summary-reference metrics for this benchmark. The smoke config uses local lexical
+reference metrics plus citation validity and map-health metrics.
