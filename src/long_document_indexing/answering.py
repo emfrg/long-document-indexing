@@ -10,6 +10,10 @@ from long_document_indexing.models.structured_outputs import (
     StructuredAnswerCitation,
     StructuredGeneratedAnswer,
 )
+from long_document_indexing.prompt_safety import (
+    apply_prompt_safety_preamble,
+    sanitize_for_model_prompt,
+)
 from long_document_indexing.prompts import render_prompt
 from long_document_indexing.services import Services
 
@@ -92,12 +96,14 @@ async def _generated_answer(
         return AnswerResult(answer="No local evidence was retrieved.", citations=[])
 
     evidence = _evidence_records(retrieved_items)
-    prompt = render_prompt(
-        services.prompt_loader.load("shared", "answer"),
-        {
-            "query": item.query,
-            "evidence": _evidence_for_prompt(evidence),
-        },
+    prompt = apply_prompt_safety_preamble(
+        render_prompt(
+            services.prompt_loader.load("shared", "answer"),
+            {
+                "query": sanitize_for_model_prompt(item.query),
+                "evidence": _evidence_for_prompt(evidence),
+            },
+        )
     )
     response = await services.generator_client.generate(
         GenerationRequest(
@@ -162,7 +168,7 @@ def _evidence_for_prompt(evidence: list[dict[str, Any]]) -> str:
                 f"document_id: {item['document_id']}",
                 f"segment_id: {item['segment_id']}",
                 f"rank: {item['rank']}",
-                f"text: {item['text']}",
+                f"text: {sanitize_for_model_prompt(str(item['text']))}",
             ]
         )
         for item in evidence

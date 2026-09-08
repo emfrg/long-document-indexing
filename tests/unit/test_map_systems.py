@@ -19,7 +19,11 @@ from long_document_indexing.storage.artifacts import ArtifactStore
 from long_document_indexing.storage.maps import read_document_map
 from long_document_indexing.systems.agentic_map import AgenticMapSystem
 from long_document_indexing.systems.hierarchical_map import HierarchicalMapSystem
-from long_document_indexing.systems.map_base import DocumentMapSystemBase, MapBuildResult
+from long_document_indexing.systems.map_base import (
+    DocumentMapSystemBase,
+    MapBuildResult,
+    normalize_document_map_source_references,
+)
 from long_document_indexing.systems.map_reduce import MapReduceSystem
 from long_document_indexing.systems.outline_then_fill import OutlineThenFillSystem
 from long_document_indexing.systems.refine import RefineSystem
@@ -189,15 +193,84 @@ async def test_map_build_normalizes_invalid_source_references_before_persistence
     assert document_map.facets["source_reference_normalization"] == {
         "map_document_id_rewrites": 0,
         "reference_document_id_rewrites": 1,
+        "segment_id_alias_rewrites": 0,
         "references_dropped": 2,
         "invalid_segment_ids_dropped": 2,
         "duplicate_segment_ids_dropped": 1,
         "entries_without_source_references": 0,
         "wrong_reference_document_ids": ["doc_wrong"],
         "invalid_segment_ids": ["missing_segment", "beta_s1"],
+        "rewritten_segment_id_aliases": [],
     }
     assert artifact.build_metadata["source_reference_normalization"]["repaired_map_count"] == 1
     assert metrics[0].value == 1.0
+
+
+def test_source_reference_normalization_resolves_unique_segment_aliases() -> None:
+    document = Document(
+        id="case:doc_0001",
+        corpus_id="case",
+        segments=[
+            Segment(
+                id="case:doc_0001:seg_0001",
+                document_id="case:doc_0001",
+                order=1,
+                text="The filing identifies the first claim.",
+            ),
+            Segment(
+                id="case:doc_0001:seg_0002",
+                document_id="case:doc_0001",
+                order=2,
+                text="The filing identifies the second claim.",
+            ),
+        ],
+    )
+    document_map = DocumentMap(
+        document_id="case:doc_0001",
+        overview="Short alias map.",
+        entries=[
+            MapEntry(
+                id="entry_1",
+                kind="issue",
+                label="First claim",
+                summary="First claim summary.",
+                source_references=[
+                    SourceReference(
+                        document_id="case:doc_0001",
+                        segment_ids=["seg_0001", "doc_0001:seg_0002"],
+                    )
+                ],
+            )
+        ],
+        construction_method="test",
+    )
+
+    normalized = normalize_document_map_source_references(document_map, document)
+
+    assert normalized.entries[0].source_references == [
+        SourceReference(
+            document_id="case:doc_0001",
+            segment_ids=[
+                "case:doc_0001:seg_0001",
+                "case:doc_0001:seg_0002",
+            ],
+        )
+    ]
+    assert normalized.facets["source_reference_normalization"] == {
+        "map_document_id_rewrites": 0,
+        "reference_document_id_rewrites": 0,
+        "segment_id_alias_rewrites": 2,
+        "references_dropped": 0,
+        "invalid_segment_ids_dropped": 0,
+        "duplicate_segment_ids_dropped": 0,
+        "entries_without_source_references": 0,
+        "wrong_reference_document_ids": [],
+        "invalid_segment_ids": [],
+        "rewritten_segment_id_aliases": [
+            "seg_0001->case:doc_0001:seg_0001",
+            "doc_0001:seg_0002->case:doc_0001:seg_0002",
+        ],
+    }
 
 
 async def test_map_reduce_reuses_partial_checkpoints_after_failed_indexing(tmp_path) -> None:
@@ -246,6 +319,51 @@ async def test_map_reduce_reuses_partial_checkpoints_after_failed_indexing(tmp_p
         "reduction_written": 1,
     }
     assert any("reused checkpoint" in message for message in progress_messages)
+
+
+async def test_refine_reuses_segment_checkpoints_after_failed_indexing(tmp_path) -> None:
+    corpus = _single_document_corpus()
+    first_client = _FlakyRefineClient(fail_on_refine_call=2)
+    first_services = _services(tmp_path, generator_client=first_client)
+
+    with pytest.raises(WorkflowExecutionError, match="planned refine failure"):
+        await run_indexing_workflow(
+            system=RefineSystem(),
+            corpus=corpus,
+            services=first_services,
+            pipeline=SharedPipelineConfig(selected_documents=1, retrieved_segments=2),
+            experiment_id="exp",
+        )
+
+    checkpoint_dir = tmp_path / "artifacts" / "exp" / "indexes" / "refine" / "checkpoints"
+    assert len(list(checkpoint_dir.glob("*/completed/*.json"))) == 1
+    assert len(list(checkpoint_dir.glob("*/failures/*.json"))) == 1
+    assert first_client.refine_segment_ids == ["alpha_s1", "alpha_s2"]
+
+    progress_messages: list[str] = []
+    second_client = _FlakyRefineClient()
+    second_services = _services(
+        tmp_path,
+        generator_client=second_client,
+        resume_checkpoints=True,
+        progress=progress_messages.append,
+    )
+
+    artifact = await run_indexing_workflow(
+        system=RefineSystem(),
+        corpus=corpus,
+        services=second_services,
+        pipeline=SharedPipelineConfig(selected_documents=1, retrieved_segments=2),
+        experiment_id="exp",
+    )
+
+    assert second_client.refine_segment_ids == ["alpha_s2"]
+    assert artifact.build_metadata["usage"]["model_calls"] == 2
+    assert artifact.build_metadata["strategy_metadata"]["checkpointing"] == {
+        "refinement_reused": 1,
+        "refinement_written": 1,
+    }
+    assert any("refine reused checkpoint" in message for message in progress_messages)
 
 
 def _services(
@@ -350,6 +468,21 @@ class _FlakyMapReduceClient:
                 raise RuntimeError("planned map failure")
         elif task == "reduce_document_maps":
             self.reduce_calls += 1
+        return await self._fake.generate(request)
+
+
+class _FlakyRefineClient:
+    def __init__(self, fail_on_refine_call: int | None = None) -> None:
+        self.fail_on_refine_call = fail_on_refine_call
+        self.refine_segment_ids: list[str] = []
+        self._fake = FakeTextGenerationClient()
+
+    async def generate(self, request: GenerationRequest) -> GenerationResponse:
+        if request.metadata.get("task") == "refine_document_map":
+            segment_id = str(request.metadata["segments"][0]["id"])
+            self.refine_segment_ids.append(segment_id)
+            if len(self.refine_segment_ids) == self.fail_on_refine_call:
+                raise RuntimeError("planned refine failure")
         return await self._fake.generate(request)
 
 

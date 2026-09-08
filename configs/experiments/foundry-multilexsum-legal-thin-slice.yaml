@@ -47,11 +47,15 @@ systems:
   - flat_vector
   - stuffing
   - map_reduce
+  - refine
+  - hierarchical_map
+  - outline_then_fill
+  - agentic_map
 
 run_control:
   resume: true
-  max_model_calls: 300
-  max_total_tokens: 1500000
+  max_model_calls: 1400
+  max_total_tokens: 7000000
 
 evaluation:
   local:

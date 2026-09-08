@@ -4,6 +4,7 @@ from long_document_indexing.config import SharedPipelineConfig
 from long_document_indexing.domain.corpus import Corpus, Document, Segment
 from long_document_indexing.domain.maps import DocumentMap
 from long_document_indexing.domain.runs import UsageRecord
+from long_document_indexing.prompt_safety import PROMPT_SAFETY_POLICY_VERSION
 from long_document_indexing.services import Services
 from long_document_indexing.storage.map_checkpoints import (
     input_signature,
@@ -102,6 +103,7 @@ class MapReduceSystem(DocumentMapSystemBase):
             phase = f"partial-{index:04d}"
             signature = input_signature(
                 self.id,
+                PROMPT_SAFETY_POLICY_VERSION,
                 corpus.id,
                 document.id,
                 self.construction_method,
@@ -209,6 +211,7 @@ async def _reduce_tree(
             phase = f"reduce-l{level:02d}-c{chunk_index:04d}"
             signature = input_signature(
                 system_id,
+                PROMPT_SAFETY_POLICY_VERSION,
                 corpus.id,
                 document.id,
                 strategy,

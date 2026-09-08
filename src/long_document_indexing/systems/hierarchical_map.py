@@ -4,7 +4,14 @@ from long_document_indexing.config import SharedPipelineConfig
 from long_document_indexing.domain.corpus import Corpus, Document, Segment
 from long_document_indexing.domain.maps import DocumentMap
 from long_document_indexing.domain.runs import UsageRecord
+from long_document_indexing.prompt_safety import PROMPT_SAFETY_POLICY_VERSION
 from long_document_indexing.services import Services
+from long_document_indexing.storage.map_checkpoints import (
+    input_signature,
+    read_map_checkpoint,
+    write_map_checkpoint,
+    write_map_checkpoint_failure,
+)
 from long_document_indexing.systems.map_base import (
     DocumentMapSystemBase,
     MapBuildResult,
@@ -40,9 +47,20 @@ class HierarchicalMapSystem(DocumentMapSystemBase):
         statuses = {}
         intermediate_maps = {}
         documents_metadata = {}
+        checkpoint_stats = _checkpoint_stats()
 
-        for document in corpus.documents:
-            leaf_maps, leaf_usage = await self._build_leaf_maps(document, services)
+        for document_index, document in enumerate(corpus.documents, start=1):
+            services.emit_progress(
+                "hierarchical_map indexing "
+                f"{corpus.id}: document {document_index}/{len(corpus.documents)} "
+                f"{document.id} ({len(document.segments)} segment(s))"
+            )
+            leaf_maps, leaf_usage = await self._build_leaf_maps(
+                corpus=corpus,
+                document=document,
+                services=services,
+                checkpoint_stats=checkpoint_stats,
+            )
             usage_records.extend(leaf_usage)
             for index, document_map in enumerate(leaf_maps):
                 intermediate_maps[
@@ -60,7 +78,13 @@ class HierarchicalMapSystem(DocumentMapSystemBase):
                 reduction_usage,
                 hierarchy_metadata,
                 reduced_intermediate_maps,
-            ) = await self._reduce_hierarchy(document, leaf_maps, services)
+            ) = await self._reduce_hierarchy(
+                corpus=corpus,
+                document=document,
+                leaf_maps=leaf_maps,
+                services=services,
+                checkpoint_stats=checkpoint_stats,
+            )
             usage_records.extend(reduction_usage)
             intermediate_maps.update(reduced_intermediate_maps)
 
@@ -85,6 +109,7 @@ class HierarchicalMapSystem(DocumentMapSystemBase):
             )
             statuses[document.id] = "indexed"
             documents_metadata[document.id] = hierarchy_metadata
+            services.emit_progress(f"hierarchical_map indexed {corpus.id}/{document.id}")
 
         return MapBuildResult(
             document_maps=document_maps,
@@ -95,38 +120,118 @@ class HierarchicalMapSystem(DocumentMapSystemBase):
                 "branching_factor": self.branching_factor,
                 "max_levels": self.max_levels,
                 "documents": documents_metadata,
+                "checkpointing": checkpoint_stats,
             },
         )
 
     async def _build_leaf_maps(
         self,
+        *,
+        corpus: Corpus,
         document: Document,
         services: Services,
+        checkpoint_stats: dict[str, int],
     ) -> tuple[list[DocumentMap], list[UsageRecord]]:
         leaf_maps = []
         usage_records = []
-        for index, segments in enumerate(_segment_groups(document, self.branching_factor)):
-            document_map, usage = await self.generate_document_map(
-                document=document,
-                segments=segments,
-                services=services,
-                prompt_parts=("hierarchical_map", "leaf"),
-                extra_metadata={
-                    "hierarchy_level": 0,
-                    "hierarchy_role": "leaf",
-                    "group_index": index,
-                    "source_segment_ids": [segment.id for segment in segments],
-                },
+        groups = _segment_groups(document, self.branching_factor)
+        for index, segments in enumerate(groups):
+            phase = f"leaf-{index + 1:04d}"
+            metadata = {
+                "hierarchy_level": 0,
+                "hierarchy_role": "leaf",
+                "group_index": index,
+                "group_count": len(groups),
+                "source_segment_ids": [segment.id for segment in segments],
+            }
+            signature = input_signature(
+                self.id,
+                PROMPT_SAFETY_POLICY_VERSION,
+                corpus.id,
+                document.id,
+                self.construction_method,
+                phase,
+                self.branching_factor,
+                [_segment_signature_payload(segment) for segment in segments],
             )
+            checkpoint = (
+                read_map_checkpoint(
+                    services.artifact_store,
+                    system_id=self.id,
+                    corpus_id=corpus.id,
+                    document_id=document.id,
+                    phase=phase,
+                    input_signature=signature,
+                )
+                if services.resume_checkpoints
+                else None
+            )
+            if checkpoint is not None:
+                document_map = checkpoint.document_map
+                usage = checkpoint.usage
+                checkpoint_stats["leaf_reused"] += 1
+                services.emit_progress(
+                    "hierarchical_map reused leaf checkpoint "
+                    f"{corpus.id}/{document.id} group {index + 1}/{len(groups)}"
+                )
+            else:
+                try:
+                    document_map, usage = await self.generate_document_map(
+                        document=document,
+                        segments=segments,
+                        services=services,
+                        prompt_parts=("hierarchical_map", "leaf"),
+                        extra_metadata=metadata,
+                    )
+                except Exception as exc:
+                    write_map_checkpoint_failure(
+                        services.artifact_store,
+                        system_id=self.id,
+                        corpus_id=corpus.id,
+                        document_id=document.id,
+                        phase=phase,
+                        input_signature=signature,
+                        error=exc,
+                        metadata=metadata,
+                    )
+                    services.emit_progress(
+                        "hierarchical_map failed leaf "
+                        f"{corpus.id}/{document.id} group {index + 1}/{len(groups)}: "
+                        f"{exc.__class__.__name__}: {exc}"
+                    )
+                    raise
+
+                write_map_checkpoint(
+                    services.artifact_store,
+                    system_id=self.id,
+                    corpus_id=corpus.id,
+                    document_id=document.id,
+                    phase=phase,
+                    input_signature=signature,
+                    document_map=document_map,
+                    usage=usage,
+                    metadata=metadata,
+                )
+                checkpoint_stats["leaf_written"] += 1
+                services.emit_progress(
+                    "hierarchical_map wrote leaf checkpoint "
+                    f"{corpus.id}/{document.id} group {index + 1}/{len(groups)} "
+                    f"({usage.model_calls} call(s), "
+                    f"{usage.input_tokens + usage.output_tokens} token(s))"
+                )
+
             leaf_maps.append(document_map)
             usage_records.append(usage)
         return leaf_maps, usage_records
 
     async def _reduce_hierarchy(
         self,
+        *,
+        corpus: Corpus,
         document: Document,
         leaf_maps: list[DocumentMap],
         services: Services,
+        checkpoint_stats: dict[str, int],
     ) -> tuple[DocumentMap | None, list[UsageRecord], dict[str, int], dict[str, DocumentMap]]:
         if not leaf_maps:
             return None, [], {"leaf_map_count": 0, "reduction_count": 0, "levels": 0}, {}
@@ -141,12 +246,19 @@ class HierarchicalMapSystem(DocumentMapSystemBase):
             level += 1
             next_level = []
             for index, chunk in enumerate(_chunks(current, self.branching_factor)):
-                reduced, usage = await reduce_maps_with_model(
+                reduced, usage = await self._reduce_chunk(
+                    corpus=corpus,
                     document=document,
-                    partial_maps=chunk,
+                    chunk=chunk,
+                    phase=f"reduce-l{level:02d}-c{index + 1:04d}",
+                    metadata={
+                        "level": level,
+                        "chunk_index": index,
+                        "chunk_count": len(_chunks(current, self.branching_factor)),
+                        "partial_map_count": len(chunk),
+                    },
                     services=services,
-                    strategy=self.construction_method,
-                    prompt_parts=("hierarchical_map", "reduce"),
+                    checkpoint_stats=checkpoint_stats,
                 )
                 reduction_count += 1
                 usage_records.append(usage)
@@ -174,12 +286,20 @@ class HierarchicalMapSystem(DocumentMapSystemBase):
 
         if len(current) > 1:
             level += 1
-            reduced, usage = await reduce_maps_with_model(
+            reduced, usage = await self._reduce_chunk(
+                corpus=corpus,
                 document=document,
-                partial_maps=current,
+                chunk=current,
+                phase=f"reduce-l{level:02d}-final",
+                metadata={
+                    "level": level,
+                    "chunk_index": 0,
+                    "chunk_count": 1,
+                    "partial_map_count": len(current),
+                    "forced_final": True,
+                },
                 services=services,
-                strategy=self.construction_method,
-                prompt_parts=("hierarchical_map", "reduce"),
+                checkpoint_stats=checkpoint_stats,
             )
             reduction_count += 1
             usage_records.append(usage)
@@ -204,6 +324,92 @@ class HierarchicalMapSystem(DocumentMapSystemBase):
             },
             intermediate_maps,
         )
+
+    async def _reduce_chunk(
+        self,
+        *,
+        corpus: Corpus,
+        document: Document,
+        chunk: list[DocumentMap],
+        phase: str,
+        metadata: dict[str, int | bool],
+        services: Services,
+        checkpoint_stats: dict[str, int],
+    ) -> tuple[DocumentMap, UsageRecord]:
+        signature = input_signature(
+            self.id,
+            PROMPT_SAFETY_POLICY_VERSION,
+            corpus.id,
+            document.id,
+            self.construction_method,
+            phase,
+            self.branching_factor,
+            self.max_levels,
+            [document_map.model_dump_json() for document_map in chunk],
+        )
+        checkpoint = (
+            read_map_checkpoint(
+                services.artifact_store,
+                system_id=self.id,
+                corpus_id=corpus.id,
+                document_id=document.id,
+                phase=phase,
+                input_signature=signature,
+            )
+            if services.resume_checkpoints
+            else None
+        )
+        if checkpoint is not None:
+            checkpoint_stats["reduction_reused"] += 1
+            services.emit_progress(
+                f"hierarchical_map reused reduction checkpoint {corpus.id}/{document.id} {phase}"
+            )
+            return checkpoint.document_map, checkpoint.usage
+
+        try:
+            reduced, usage = await reduce_maps_with_model(
+                document=document,
+                partial_maps=chunk,
+                services=services,
+                strategy=self.construction_method,
+                prompt_parts=("hierarchical_map", "reduce"),
+            )
+        except Exception as exc:
+            write_map_checkpoint_failure(
+                services.artifact_store,
+                system_id=self.id,
+                corpus_id=corpus.id,
+                document_id=document.id,
+                phase=phase,
+                input_signature=signature,
+                error=exc,
+                metadata=dict(metadata),
+            )
+            services.emit_progress(
+                "hierarchical_map failed reduction "
+                f"{corpus.id}/{document.id} {phase}: {exc.__class__.__name__}: {exc}"
+            )
+            raise
+
+        write_map_checkpoint(
+            services.artifact_store,
+            system_id=self.id,
+            corpus_id=corpus.id,
+            document_id=document.id,
+            phase=phase,
+            input_signature=signature,
+            document_map=reduced,
+            usage=usage,
+            metadata=dict(metadata),
+        )
+        checkpoint_stats["reduction_written"] += 1
+        services.emit_progress(
+            "hierarchical_map wrote reduction checkpoint "
+            f"{corpus.id}/{document.id} {phase} "
+            f"({usage.model_calls} call(s), "
+            f"{usage.input_tokens + usage.output_tokens} token(s))"
+        )
+        return reduced, usage
 
 
 def _segment_groups(document: Document, group_size: int) -> list[list[Segment]]:
@@ -247,3 +453,16 @@ def _intermediate_map_id(
     index: int,
 ) -> str:
     return stable_id("map", system_id, corpus_id, document_id, role, level, index)
+
+
+def _segment_signature_payload(segment: Segment) -> dict[str, object]:
+    return {"id": segment.id, "order": segment.order, "text": segment.text}
+
+
+def _checkpoint_stats() -> dict[str, int]:
+    return {
+        "leaf_reused": 0,
+        "leaf_written": 0,
+        "reduction_reused": 0,
+        "reduction_written": 0,
+    }

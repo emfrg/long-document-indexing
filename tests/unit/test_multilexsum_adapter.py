@@ -223,10 +223,18 @@ def test_foundry_multilexsum_legal_thin_slice_config_is_bounded_real_run() -> No
     assert config.models.generator_api == "responses"
     assert config.models.generator_response_format == "structured"
     assert config.answering.mode == "generated"
-    assert config.systems == ["flat_vector", "stuffing", "map_reduce"]
+    assert config.systems == [
+        "flat_vector",
+        "stuffing",
+        "map_reduce",
+        "refine",
+        "hierarchical_map",
+        "outline_then_fill",
+        "agentic_map",
+    ]
     assert config.run_control.resume is True
-    assert config.run_control.max_model_calls == 300
-    assert config.run_control.max_total_tokens == 1_500_000
+    assert config.run_control.max_model_calls == 1400
+    assert config.run_control.max_total_tokens == 7_000_000
     assert config.dataset.adapter == "multilexsum"
     assert config.dataset.options["trust_remote_code"] is True
     assert config.evaluation.local == [

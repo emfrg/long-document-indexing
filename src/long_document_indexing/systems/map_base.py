@@ -14,6 +14,12 @@ from long_document_indexing.domain.maps import DocumentMap, IndexArtifact, MapEn
 from long_document_indexing.domain.runs import RagRunRecord, UsageRecord
 from long_document_indexing.models.base import GenerationRequest, GenerationResponse
 from long_document_indexing.models.structured_outputs import StructuredDocumentMap
+from long_document_indexing.prompt_safety import (
+    PROMPT_SAFETY_POLICY_VERSION,
+    apply_prompt_safety_preamble,
+    sanitize_for_model_prompt,
+    sanitize_prompt_payload,
+)
 from long_document_indexing.prompts import render_prompt
 from long_document_indexing.services import Services
 from long_document_indexing.storage.maps import read_document_map, write_document_map
@@ -91,6 +97,7 @@ class DocumentMapSystemBase(ABC):
             "document_map_paths": document_map_paths,
             "document_statuses": result.statuses,
             "usage": result.usage.model_dump(mode="json"),
+            "prompt_safety_policy": PROMPT_SAFETY_POLICY_VERSION,
         }
         if intermediate_map_paths:
             build_metadata["intermediate_map_paths"] = intermediate_map_paths
@@ -186,18 +193,20 @@ class DocumentMapSystemBase(ABC):
     ) -> tuple[DocumentMap, UsageRecord]:
         client = _generator_client(services)
         template = services.prompt_loader.load(*prompt_parts)
-        prompt = render_prompt(
-            template,
-            _prompt_values(
-                {
-                    "document_id": document.id,
-                    "title": document.title or document.id,
-                    "construction_method": self.construction_method,
-                    "segment_count": len(segments),
-                    "segments": _segments_for_prompt(segments),
-                },
-                extra_metadata,
-            ),
+        prompt = apply_prompt_safety_preamble(
+            render_prompt(
+                template,
+                _prompt_values(
+                    {
+                        "document_id": document.id,
+                        "title": document.title or document.id,
+                        "construction_method": self.construction_method,
+                        "segment_count": len(segments),
+                        "segments": _segments_for_prompt(segments),
+                    },
+                    extra_metadata,
+                ),
+            )
         )
         response = await client.generate(
             GenerationRequest(
@@ -241,6 +250,7 @@ def normalize_document_map_source_references(
     """Repair model-produced source references against canonical document segments."""
 
     valid_segment_ids = {segment.id for segment in document.segments}
+    segment_id_aliases = _segment_id_aliases(document)
     summary = _empty_source_reference_normalization_summary()
 
     if document_map.document_id != document.id:
@@ -251,6 +261,7 @@ def normalize_document_map_source_references(
             entry,
             document_id=document.id,
             valid_segment_ids=valid_segment_ids,
+            segment_id_aliases=segment_id_aliases,
             summary=summary,
         )
         for entry in document_map.entries
@@ -284,6 +295,7 @@ _SOURCE_REFERENCE_NORMALIZATION_FACET = "source_reference_normalization"
 _SOURCE_REFERENCE_COUNT_KEYS = (
     "map_document_id_rewrites",
     "reference_document_id_rewrites",
+    "segment_id_alias_rewrites",
     "references_dropped",
     "invalid_segment_ids_dropped",
     "duplicate_segment_ids_dropped",
@@ -292,6 +304,7 @@ _SOURCE_REFERENCE_COUNT_KEYS = (
 _SOURCE_REFERENCE_SAMPLE_KEYS = (
     "wrong_reference_document_ids",
     "invalid_segment_ids",
+    "rewritten_segment_id_aliases",
 )
 _SOURCE_REFERENCE_SAMPLE_LIMIT = 20
 
@@ -301,6 +314,7 @@ def _normalize_entry_source_references(
     *,
     document_id: str,
     valid_segment_ids: set[str],
+    segment_id_aliases: dict[str, str],
     summary: dict[str, Any],
 ) -> MapEntry:
     source_references = [
@@ -310,6 +324,7 @@ def _normalize_entry_source_references(
                 reference,
                 document_id=document_id,
                 valid_segment_ids=valid_segment_ids,
+                segment_id_aliases=segment_id_aliases,
                 summary=summary,
             )
             for reference in entry.source_references
@@ -321,6 +336,7 @@ def _normalize_entry_source_references(
             child,
             document_id=document_id,
             valid_segment_ids=valid_segment_ids,
+            segment_id_aliases=segment_id_aliases,
             summary=summary,
         )
         for child in entry.children
@@ -341,20 +357,29 @@ def _normalize_source_reference(
     *,
     document_id: str,
     valid_segment_ids: set[str],
+    segment_id_aliases: dict[str, str],
     summary: dict[str, Any],
 ) -> SourceReference | None:
     segment_ids: list[str] = []
     seen_segment_ids = set()
     for segment_id in reference.segment_ids:
-        if segment_id not in valid_segment_ids:
+        canonical_segment_id = segment_id_aliases.get(segment_id)
+        if canonical_segment_id is None or canonical_segment_id not in valid_segment_ids:
             summary["invalid_segment_ids_dropped"] += 1
             _append_source_reference_sample(summary, "invalid_segment_ids", segment_id)
             continue
-        if segment_id in seen_segment_ids:
+        if canonical_segment_id != segment_id:
+            summary["segment_id_alias_rewrites"] += 1
+            _append_source_reference_sample(
+                summary,
+                "rewritten_segment_id_aliases",
+                f"{segment_id}->{canonical_segment_id}",
+            )
+        if canonical_segment_id in seen_segment_ids:
             summary["duplicate_segment_ids_dropped"] += 1
             continue
-        segment_ids.append(segment_id)
-        seen_segment_ids.add(segment_id)
+        segment_ids.append(canonical_segment_id)
+        seen_segment_ids.add(canonical_segment_id)
 
     if not segment_ids:
         summary["references_dropped"] += 1
@@ -382,6 +407,27 @@ def _empty_source_reference_normalization_summary() -> dict[str, Any]:
         **dict.fromkeys(_SOURCE_REFERENCE_COUNT_KEYS, 0),
         **{key: [] for key in _SOURCE_REFERENCE_SAMPLE_KEYS},
     }
+
+
+def _segment_id_aliases(document: Document) -> dict[str, str]:
+    aliases: dict[str, set[str]] = {}
+    for segment in document.segments:
+        for alias in _candidate_segment_id_aliases(segment.id, document.id):
+            aliases.setdefault(alias, set()).add(segment.id)
+    return {
+        alias: next(iter(segment_ids))
+        for alias, segment_ids in aliases.items()
+        if len(segment_ids) == 1
+    }
+
+
+def _candidate_segment_id_aliases(segment_id: str, document_id: str) -> set[str]:
+    aliases = {segment_id}
+    if segment_id.startswith(f"{document_id}:"):
+        aliases.add(segment_id.removeprefix(f"{document_id}:"))
+    parts = segment_id.split(":")
+    aliases.update(":".join(parts[index:]) for index in range(1, len(parts)))
+    return aliases
 
 
 def _has_source_reference_repairs(summary: dict[str, Any]) -> bool:
@@ -449,7 +495,7 @@ def _segment_payload(segment: Segment) -> dict[str, Any]:
 
 def _segments_for_prompt(segments: list[Segment]) -> str:
     return "\n\n".join(
-        f"[{segment.id}]\n{segment.text}"
+        f"[{segment.id}]\n{sanitize_for_model_prompt(segment.text)}"
         for segment in sorted(segments, key=lambda item: item.order)
     )
 
@@ -458,12 +504,13 @@ def _prompt_values(
     base: dict[str, Any],
     extra_metadata: dict[str, Any] | None,
 ) -> dict[str, Any]:
-    values = dict(base)
+    values = {key: sanitize_prompt_payload(value, key=key) for key, value in base.items()}
     for key, value in (extra_metadata or {}).items():
-        if isinstance(value, str | int | float | bool) or value is None:
-            values[key] = "" if value is None else value
+        safe_value = sanitize_prompt_payload(value, key=key)
+        if isinstance(safe_value, str | int | float | bool) or safe_value is None:
+            values[key] = "" if safe_value is None else safe_value
         else:
-            values[key] = json.dumps(value, indent=2, sort_keys=True)
+            values[key] = json.dumps(safe_value, indent=2, sort_keys=True)
     return values
 
 
@@ -526,19 +573,23 @@ async def reduce_maps_with_model(
 ) -> tuple[DocumentMap, UsageRecord]:
     client = _generator_client(services)
     template = services.prompt_loader.load(*prompt_parts)
-    prompt = render_prompt(
-        template,
-        {
-            "document_id": document.id,
-            "title": document.title or document.id,
-            "construction_method": strategy,
-            "partial_map_count": len(partial_maps),
-            "partial_maps": json.dumps(
-                [document_map.model_dump(mode="json") for document_map in partial_maps],
-                indent=2,
-                sort_keys=True,
-            ),
-        },
+    prompt = apply_prompt_safety_preamble(
+        render_prompt(
+            template,
+            {
+                "document_id": document.id,
+                "title": sanitize_for_model_prompt(document.title or document.id),
+                "construction_method": strategy,
+                "partial_map_count": len(partial_maps),
+                "partial_maps": json.dumps(
+                    sanitize_prompt_payload(
+                        [document_map.model_dump(mode="json") for document_map in partial_maps]
+                    ),
+                    indent=2,
+                    sort_keys=True,
+                ),
+            },
+        )
     )
     response: GenerationResponse = await client.generate(
         GenerationRequest(
@@ -575,20 +626,24 @@ async def refine_map_with_model(
 ) -> tuple[DocumentMap, UsageRecord]:
     client = _generator_client(services)
     template = services.prompt_loader.load(*prompt_parts)
-    prompt = render_prompt(
-        template,
-        {
-            "document_id": document.id,
-            "title": document.title or document.id,
-            "construction_method": strategy,
-            "segment_id": segment.id,
-            "segment_text": segment.text,
-            "existing_map": json.dumps(
-                existing_map.model_dump(mode="json") if existing_map is not None else {},
-                indent=2,
-                sort_keys=True,
-            ),
-        },
+    prompt = apply_prompt_safety_preamble(
+        render_prompt(
+            template,
+            {
+                "document_id": document.id,
+                "title": sanitize_for_model_prompt(document.title or document.id),
+                "construction_method": strategy,
+                "segment_id": segment.id,
+                "segment_text": sanitize_for_model_prompt(segment.text),
+                "existing_map": json.dumps(
+                    sanitize_prompt_payload(
+                        existing_map.model_dump(mode="json") if existing_map is not None else {}
+                    ),
+                    indent=2,
+                    sort_keys=True,
+                ),
+            },
+        )
     )
     response = await client.generate(
         GenerationRequest(
