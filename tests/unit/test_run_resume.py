@@ -5,11 +5,26 @@ from pathlib import Path
 
 import pytest
 
-from long_document_indexing.cli import _index, _prepare, _query
+from long_document_indexing.cli import (
+    _index,
+    _is_reusable_index_artifact,
+    _is_reusable_query_record,
+    _prepare,
+    _query,
+)
 from long_document_indexing.config import RunControlConfig, load_experiment_config
+from long_document_indexing.domain.maps import IndexArtifact
 from long_document_indexing.domain.runs import RagRunRecord
+from long_document_indexing.prompt_safety import PROMPT_SAFETY_POLICY_VERSION
 from long_document_indexing.run_control import BudgetExceeded
+from long_document_indexing.systems.map_base import (
+    MAP_SOURCE_REFERENCE_NORMALIZATION_POLICY_VERSION,
+)
 from long_document_indexing.telemetry.usage import UsageEvent
+from long_document_indexing.workflows.common_query import (
+    QUERY_RUN_POLICY_VERSION,
+    index_artifact_signature,
+)
 
 
 def test_resume_reuses_succeeded_index_and_query_artifacts(tmp_path) -> None:
@@ -34,6 +49,83 @@ def test_resume_reuses_succeeded_index_and_query_artifacts(tmp_path) -> None:
     assert _jsonl_count(experiment_dir / "runs/stuffing.jsonl") == run_count
     assert len(records) == 2
     assert {record.status for record in records} == {"succeeded"}
+    assert {record.query_policy_version for record in records} == {QUERY_RUN_POLICY_VERSION}
+    assert all(record.index_artifact_id for record in records)
+    assert all(record.index_artifact_signature for record in records)
+
+
+def test_stale_map_artifacts_are_not_reusable(tmp_path) -> None:
+    artifact_path = tmp_path / "index.json"
+    map_path = tmp_path / "map.json"
+    artifact_path.write_text("{}", encoding="utf-8")
+    map_path.write_text("{}", encoding="utf-8")
+
+    current = _index_artifact(
+        artifact_path=artifact_path,
+        map_path=map_path,
+        prompt_safety_policy=PROMPT_SAFETY_POLICY_VERSION,
+        source_reference_normalization_policy=(MAP_SOURCE_REFERENCE_NORMALIZATION_POLICY_VERSION),
+    )
+    stale_prompt = _index_artifact(
+        artifact_path=artifact_path,
+        map_path=map_path,
+        prompt_safety_policy="old-prompt-policy",
+        source_reference_normalization_policy=(MAP_SOURCE_REFERENCE_NORMALIZATION_POLICY_VERSION),
+    )
+    stale_normalization = _index_artifact(
+        artifact_path=artifact_path,
+        map_path=map_path,
+        prompt_safety_policy=PROMPT_SAFETY_POLICY_VERSION,
+        source_reference_normalization_policy="old-normalization-policy",
+    )
+
+    assert _is_reusable_index_artifact(current) is True
+    assert _is_reusable_index_artifact(stale_prompt) is False
+    assert _is_reusable_index_artifact(stale_normalization) is False
+
+
+def test_query_records_are_reusable_only_for_matching_index_signature(tmp_path) -> None:
+    artifact_path = tmp_path / "index.json"
+    map_path = tmp_path / "map.json"
+    artifact_path.write_text("{}", encoding="utf-8")
+    map_path.write_text("{}", encoding="utf-8")
+    artifact = _index_artifact(
+        artifact_path=artifact_path,
+        map_path=map_path,
+        prompt_safety_policy=PROMPT_SAFETY_POLICY_VERSION,
+        source_reference_normalization_policy=(MAP_SOURCE_REFERENCE_NORMALIZATION_POLICY_VERSION),
+    )
+    record = RagRunRecord(
+        run_id="run",
+        experiment_id="exp",
+        system_id="stuffing",
+        corpus_id="corpus",
+        item_id="item",
+        selected_document_ids=[],
+        retrieved_items=[],
+        answer="answer",
+        citations=[],
+        status="succeeded",
+        index_artifact_id=artifact.id,
+        index_artifact_signature=index_artifact_signature(artifact),
+        query_policy_version=QUERY_RUN_POLICY_VERSION,
+    )
+
+    assert _is_reusable_query_record(record, artifact) is True
+    assert (
+        _is_reusable_query_record(
+            record.model_copy(update={"query_policy_version": "old-query-policy"}),
+            artifact,
+        )
+        is False
+    )
+    assert (
+        _is_reusable_query_record(
+            record.model_copy(update={"index_artifact_signature": "old-signature"}),
+            artifact,
+        )
+        is False
+    )
 
 
 def test_exhausted_query_budget_writes_skipped_records(tmp_path) -> None:
@@ -83,6 +175,27 @@ def _foundry_export_smoke_config(tmp_path: Path):
         update={
             "storage": config.storage.model_copy(update={"artifacts_dir": tmp_path / "artifacts"})
         }
+    )
+
+
+def _index_artifact(
+    *,
+    artifact_path: Path,
+    map_path: Path,
+    prompt_safety_policy: str,
+    source_reference_normalization_policy: str,
+) -> IndexArtifact:
+    return IndexArtifact(
+        id="index-current",
+        system_id="stuffing",
+        corpus_id="corpus",
+        artifact_path=str(artifact_path),
+        document_map_ids=["map-current"],
+        build_metadata={
+            "document_map_paths": {"map-current": str(map_path)},
+            "prompt_safety_policy": prompt_safety_policy,
+            "source_reference_normalization_policy": source_reference_normalization_policy,
+        },
     )
 
 

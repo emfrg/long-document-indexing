@@ -26,6 +26,7 @@ from long_document_indexing.evaluation.foundry import (
 from long_document_indexing.evaluation.local.maps import evaluate_index_artifact
 from long_document_indexing.evaluation.runner import evaluate_run
 from long_document_indexing.models.factory import create_text_generation_client
+from long_document_indexing.prompt_safety import PROMPT_SAFETY_POLICY_VERSION
 from long_document_indexing.prompts import PromptLoader
 from long_document_indexing.reporting import (
     build_report_bundle,
@@ -42,11 +43,18 @@ from long_document_indexing.run_control import (
 )
 from long_document_indexing.services import Services
 from long_document_indexing.storage.artifacts import ArtifactStore
+from long_document_indexing.systems.map_base import (
+    MAP_SOURCE_REFERENCE_NORMALIZATION_POLICY_VERSION,
+)
 from long_document_indexing.systems.registry import create_system
 from long_document_indexing.telemetry.tracing import stable_query_run_id
 from long_document_indexing.telemetry.usage import UsageEvent, UsageLedger
 from long_document_indexing.workflows.common_indexing import run_indexing_workflow
-from long_document_indexing.workflows.common_query import run_query_workflow
+from long_document_indexing.workflows.common_query import (
+    QUERY_RUN_POLICY_VERSION,
+    index_artifact_signature,
+    run_query_workflow,
+)
 from long_document_indexing.workflows.execution import LocalWorkflowRunner, MafWorkflowRunner
 
 app = typer.Typer(no_args_is_help=True)
@@ -214,6 +222,9 @@ def _dry_run_budget(config: ExperimentConfig, run_control: RunControlConfig) -> 
     initial_events = [*existing_index_events, *existing_query_events] if run_control.resume else []
     budget = BudgetLedger(run_control, initial_events=initial_events)
     existing_artifacts = _load_index_artifacts_from_dir(experiment_dir)
+    reusable_artifacts = [
+        artifact for artifact in existing_artifacts if _is_reusable_index_artifact(artifact)
+    ]
     existing_runs = _load_run_records_from_dir(experiment_dir, config)
     successful_runs = [record for record in existing_runs if record.status == "succeeded"]
     planned_index_units = len(config.systems) * len(loaded.corpora)
@@ -227,6 +238,7 @@ def _dry_run_budget(config: ExperimentConfig, run_control: RunControlConfig) -> 
         "Planned units: "
         f"index={planned_index_units}, query={planned_query_units}, "
         f"existing_indexes={len(existing_artifacts)}, "
+        f"reusable_indexes={len(reusable_artifacts)}, "
         f"existing_successful_queries={len(successful_runs)}"
     )
     for line in describe_budget(run_control, budget.snapshot):
@@ -369,7 +381,7 @@ async def _query(
                         repetition,
                     )
                     existing = records_by_run_id.get(run_id)
-                    if existing is not None and existing.status == "succeeded":
+                    if existing is not None and _is_reusable_query_record(existing, artifact):
                         reused += 1
                         continue
 
@@ -382,6 +394,7 @@ async def _query(
                             corpus_id=corpus.id,
                             item_id=item.id,
                             repetition=repetition,
+                            index_artifact=artifact,
                             reason=exhausted_reason,
                         )
                         skipped += 1
@@ -711,10 +724,31 @@ def _index_artifact_key(artifact: IndexArtifact) -> tuple[str, str]:
 def _is_reusable_index_artifact(artifact: IndexArtifact) -> bool:
     if not Path(artifact.artifact_path).exists():
         return False
-    paths = artifact.build_metadata.get("document_map_paths", {})
-    if not isinstance(paths, dict):
+    paths = artifact.build_metadata.get("document_map_paths")
+    if paths is None:
         return True
+    if not isinstance(paths, dict):
+        return False
+    if not _has_current_map_artifact_policy(artifact):
+        return False
     return all(Path(str(path)).exists() for path in paths.values())
+
+
+def _has_current_map_artifact_policy(artifact: IndexArtifact) -> bool:
+    return (
+        artifact.build_metadata.get("prompt_safety_policy") == PROMPT_SAFETY_POLICY_VERSION
+        and artifact.build_metadata.get("source_reference_normalization_policy")
+        == MAP_SOURCE_REFERENCE_NORMALIZATION_POLICY_VERSION
+    )
+
+
+def _is_reusable_query_record(record: RagRunRecord, artifact: IndexArtifact) -> bool:
+    return (
+        record.status == "succeeded"
+        and record.index_artifact_id == artifact.id
+        and record.index_artifact_signature == index_artifact_signature(artifact)
+        and record.query_policy_version == QUERY_RUN_POLICY_VERSION
+    )
 
 
 def _usage_from_index_artifact(artifact: IndexArtifact) -> UsageRecord:
@@ -777,6 +811,7 @@ def _skipped_run_record(
     corpus_id: str,
     item_id: str,
     repetition: int,
+    index_artifact: IndexArtifact,
     reason: str,
 ) -> RagRunRecord:
     return RagRunRecord(
@@ -791,6 +826,9 @@ def _skipped_run_record(
         answer="",
         citations=[],
         usage=UsageRecord(),
+        index_artifact_id=index_artifact.id,
+        index_artifact_signature=index_artifact_signature(index_artifact),
+        query_policy_version=QUERY_RUN_POLICY_VERSION,
         status="skipped",
         error=reason,
     )

@@ -29,6 +29,8 @@ from long_document_indexing.text import (
     lexical_similarity,
 )
 
+MAP_SOURCE_REFERENCE_NORMALIZATION_POLICY_VERSION = "source-reference-normalization/v2"
+
 
 @dataclass
 class MapBuildResult:
@@ -98,6 +100,9 @@ class DocumentMapSystemBase(ABC):
             "document_statuses": result.statuses,
             "usage": result.usage.model_dump(mode="json"),
             "prompt_safety_policy": PROMPT_SAFETY_POLICY_VERSION,
+            "source_reference_normalization_policy": (
+                MAP_SOURCE_REFERENCE_NORMALIZATION_POLICY_VERSION
+            ),
         }
         if intermediate_map_paths:
             build_metadata["intermediate_map_paths"] = intermediate_map_paths

@@ -253,5 +253,34 @@ def test_foundry_multilexsum_legal_thin_slice_config_is_bounded_real_run() -> No
     assert config.evaluation.foundry.evaluators == ["groundedness", "relevance"]
 
 
+def test_foundry_multilexsum_clean_all_systems_config_is_bounded_real_run() -> None:
+    config = load_experiment_config(
+        Path("configs/experiments/foundry-multilexsum-legal-clean-all-systems.yaml"),
+        project_root=Path.cwd(),
+    )
+
+    assert config.experiment.id == "foundry-multilexsum-legal-clean-all-systems"
+    assert config.models.generator_provider == "foundry"
+    assert config.models.generator_api == "responses"
+    assert config.models.generator_response_format == "structured"
+    assert config.answering.mode == "generated"
+    assert config.systems == [
+        "flat_vector",
+        "stuffing",
+        "map_reduce",
+        "refine",
+        "hierarchical_map",
+        "outline_then_fill",
+        "agentic_map",
+    ]
+    assert config.run_control.resume is True
+    assert config.run_control.max_model_calls == 1400
+    assert config.run_control.max_total_tokens == 7_000_000
+    assert config.dataset.adapter == "multilexsum"
+    assert config.dataset.options["trust_remote_code"] is True
+    assert config.evaluation.foundry.enabled is True
+    assert config.evaluation.foundry.evaluators == ["groundedness", "relevance"]
+
+
 def _words(prefix: str, count: int) -> str:
     return " ".join(f"{prefix}_{index}" for index in range(count))

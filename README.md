@@ -198,6 +198,24 @@ This config compares `flat_vector`, `stuffing`, `map_reduce`, and `refine` with 
 
 Azure login is not required for this API-key based run. Configure `FOUNDRY_GENERATOR_BASE_URL`, `FOUNDRY_GENERATOR_DEPLOYMENT`, and `AZURE_INFERENCE_CREDENTIAL` before running it.
 
+## Multi-LexSum Legal Benchmark
+
+The legal branch adds Multi-LexSum case-file support for longer, multi-document legal corpora. The selected thin slice uses 5 Civil Rights Litigation Clearinghouse cases, 32 source documents, and 186 source segments.
+
+Run the resumable development benchmark:
+
+```bash
+uv run --python 3.13 --extra foundry --extra multilexsum --no-editable --reinstall-package long-document-indexing ldi run --config configs/experiments/foundry-multilexsum-legal-thin-slice.yaml
+```
+
+Run the clean all-systems benchmark for blog/report tables:
+
+```bash
+uv run --python 3.13 --extra foundry --extra multilexsum --no-editable --reinstall-package long-document-indexing ldi run --config configs/experiments/foundry-multilexsum-legal-clean-all-systems.yaml
+```
+
+Both configs use API-key auth, so Azure CLI login is not required. They enable resume and checkpoint reuse because real legal runs can span many model calls. Map artifacts record prompt-safety and source-reference normalization policy versions; stale map artifacts are rebuilt instead of silently reused.
+
 ## Enterprise Thin Slice Benchmark
 
 Milestone 11 adds a larger local benchmark fixture under `benchmarks/enterprise/`. It is synthetic and versioned in the repo: 8 documents, 24 source segments, and 16 gold-labeled questions covering policy, incident, launch, budget, training, audit, and escalation notes.

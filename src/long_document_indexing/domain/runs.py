@@ -73,6 +73,9 @@ class RagRunRecord(BaseModel):
     citations: list[Citation]
 
     usage: UsageRecord = Field(default_factory=UsageRecord)
+    index_artifact_id: str | None = None
+    index_artifact_signature: str | None = None
+    query_policy_version: str | None = None
     trace_id: str | None = None
     workflow_artifact_path: str | None = None
     status: Literal["succeeded", "failed", "skipped"]

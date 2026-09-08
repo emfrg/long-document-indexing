@@ -7,10 +7,11 @@ from long_document_indexing.domain.maps import IndexArtifact
 from long_document_indexing.domain.runs import RagRunRecord, RunContext, UsageRecord
 from long_document_indexing.services import Services
 from long_document_indexing.systems.base import RagSystem
-from long_document_indexing.telemetry.tracing import stable_query_run_id
+from long_document_indexing.telemetry.tracing import stable_id, stable_query_run_id
 from long_document_indexing.workflows.execution import WorkflowExecutionError
 
 WORKFLOW_NAME = "common_query"
+QUERY_RUN_POLICY_VERSION = "query-run/v2"
 
 
 async def run_query_workflow(
@@ -82,6 +83,9 @@ async def run_query_workflow(
             answer="",
             citations=[],
             usage=UsageRecord(),
+            index_artifact_id=index_artifact.id,
+            index_artifact_signature=index_artifact_signature(index_artifact),
+            query_policy_version=QUERY_RUN_POLICY_VERSION,
             trace_id=exc.record.trace_id,
             workflow_artifact_path=str(workflow_path),
             status="failed",
@@ -95,6 +99,9 @@ async def run_query_workflow(
 
     record = result.output.model_copy(
         update={
+            "index_artifact_id": index_artifact.id,
+            "index_artifact_signature": index_artifact_signature(index_artifact),
+            "query_policy_version": QUERY_RUN_POLICY_VERSION,
             "trace_id": result.record.trace_id,
             "workflow_artifact_path": str(workflow_path),
         }
@@ -114,6 +121,20 @@ async def run_query_workflow(
         metadata={"workflow_artifact_path": str(workflow_path)},
     )
     return record
+
+
+def index_artifact_signature(index_artifact: IndexArtifact) -> str:
+    return stable_id(
+        "index-artifact",
+        index_artifact.id,
+        index_artifact.system_id,
+        index_artifact.corpus_id,
+        *index_artifact.document_map_ids,
+        str(index_artifact.build_metadata.get("retrieval_index_id", "")),
+        str(index_artifact.build_metadata.get("backend", "")),
+        str(index_artifact.build_metadata.get("prompt_safety_policy", "")),
+        str(index_artifact.build_metadata.get("source_reference_normalization_policy", "")),
+    )
 
 
 def validate_rag_run_record(
