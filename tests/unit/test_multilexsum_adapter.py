@@ -213,5 +213,37 @@ def test_multilexsum_casefile_smoke_config_is_benchmark_ready() -> None:
     assert config.evaluation.foundry.enabled is True
 
 
+def test_foundry_multilexsum_legal_thin_slice_config_is_bounded_real_run() -> None:
+    config = load_experiment_config(
+        Path("configs/experiments/foundry-multilexsum-legal-thin-slice.yaml"),
+        project_root=Path.cwd(),
+    )
+
+    assert config.models.generator_provider == "foundry"
+    assert config.models.generator_api == "responses"
+    assert config.models.generator_response_format == "structured"
+    assert config.answering.mode == "generated"
+    assert config.systems == ["flat_vector", "stuffing", "map_reduce"]
+    assert config.run_control.resume is True
+    assert config.run_control.max_model_calls == 300
+    assert config.run_control.max_total_tokens == 1_500_000
+    assert config.dataset.adapter == "multilexsum"
+    assert config.dataset.options["trust_remote_code"] is True
+    assert config.evaluation.local == [
+        "map_schema_validity",
+        "map_source_reference_validity",
+        "map_compression_ratio",
+        "map_completion_rate",
+        "answer_reference_similarity",
+        "answer_reference_token_precision",
+        "answer_reference_token_recall",
+        "answer_reference_token_f1",
+        "invalid_citation_rate",
+        "query_duration_ms",
+        "tool_calls",
+    ]
+    assert config.evaluation.foundry.evaluators == ["groundedness", "relevance"]
+
+
 def _words(prefix: str, count: int) -> str:
     return " ".join(f"{prefix}_{index}" for index in range(count))

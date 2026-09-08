@@ -130,22 +130,10 @@ def _validated_generated_citations(
         source = evidence_by_id.get(citation.evidence_id)
         if source is None:
             raise ValueError(f"generated answer cited unknown evidence: {citation.evidence_id}")
-        if citation.document_id != source["document_id"]:
-            raise ValueError(
-                "generated answer citation document mismatch for "
-                f"{citation.evidence_id}: expected {source['document_id']!r}, "
-                f"got {citation.document_id!r}"
-            )
-        if citation.segment_id != source["segment_id"]:
-            raise ValueError(
-                "generated answer citation segment mismatch for "
-                f"{citation.evidence_id}: expected {source['segment_id']!r}, "
-                f"got {citation.segment_id!r}"
-            )
         validated.append(
             Citation(
-                document_id=citation.document_id,
-                segment_id=citation.segment_id,
+                document_id=str(source["document_id"]),
+                segment_id=str(source["segment_id"]),
                 quote=citation.quote,
             )
         )

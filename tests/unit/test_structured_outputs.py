@@ -21,6 +21,36 @@ def test_structured_generated_answer_schema_uses_closed_objects() -> None:
     assert _object_paths_with_open_properties(schema) == []
 
 
+def test_structured_schemas_avoid_foundry_unsupported_type_constraints() -> None:
+    unsupported_keywords = {
+        "minLength",
+        "maxLength",
+        "pattern",
+        "format",
+        "minimum",
+        "maximum",
+        "multipleOf",
+        "patternProperties",
+        "unevaluatedProperties",
+        "propertyNames",
+        "minProperties",
+        "maxProperties",
+        "unevaluatedItems",
+        "contains",
+        "minContains",
+        "maxContains",
+        "minItems",
+        "maxItems",
+        "uniqueItems",
+    }
+
+    for schema in (
+        StructuredDocumentMap.model_json_schema(),
+        StructuredGeneratedAnswer.model_json_schema(),
+    ):
+        assert _schema_keys(schema).isdisjoint(unsupported_keywords)
+
+
 def test_structured_document_map_deduplicates_model_entry_ids() -> None:
     document_map = StructuredDocumentMap(
         document_id="doc_alpha",
@@ -73,3 +103,15 @@ def _object_paths_with_open_properties(value: object, path: str = "$") -> list[s
         for index, item in enumerate(value):
             paths.extend(_object_paths_with_open_properties(item, f"{path}[{index}]"))
     return paths
+
+
+def _schema_keys(value: object) -> set[str]:
+    keys: set[str] = set()
+    if isinstance(value, dict):
+        keys.update(str(key) for key in value)
+        for item in value.values():
+            keys.update(_schema_keys(item))
+    elif isinstance(value, list):
+        for item in value:
+            keys.update(_schema_keys(item))
+    return keys

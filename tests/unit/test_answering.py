@@ -73,6 +73,25 @@ async def test_generated_answer_rejects_citations_outside_retrieved_evidence(tmp
         )
 
 
+async def test_generated_answer_normalizes_citation_ids_from_evidence_id(tmp_path) -> None:
+    services = _services(
+        tmp_path,
+        answering_mode="generated",
+        generator_client=_MismatchedCitationClient(),
+    )
+
+    result = await answer_from_retrieved_evidence(
+        item=_item(),
+        retrieved_items=_retrieved_items(),
+        services=services,
+        extractive_prefix="Local answer",
+    )
+
+    assert result.citations[0].document_id == "doc_alpha"
+    assert result.citations[0].segment_id == "alpha_s2"
+    assert result.citations[0].quote == "Supported quote."
+
+
 class _InvalidCitationClient:
     async def generate(self, request: GenerationRequest) -> GenerationResponse:
         assert request.response_model is StructuredGeneratedAnswer
@@ -87,6 +106,28 @@ class _InvalidCitationClient:
                             "document_id": "doc_alpha",
                             "segment_id": "alpha_s1",
                             "quote": "Unsupported quote.",
+                        }
+                    ],
+                }
+            ),
+            usage=UsageRecord(model_calls=1),
+        )
+
+
+class _MismatchedCitationClient:
+    async def generate(self, request: GenerationRequest) -> GenerationResponse:
+        assert request.response_model is StructuredGeneratedAnswer
+        return GenerationResponse(
+            content=json.dumps(
+                {
+                    "status": "answered",
+                    "answer": "Supported answer.",
+                    "citations": [
+                        {
+                            "evidence_id": "evidence_2",
+                            "document_id": "wrong_doc",
+                            "segment_id": "wrong_segment",
+                            "quote": "Supported quote.",
                         }
                     ],
                 }
