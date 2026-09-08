@@ -71,6 +71,10 @@ class MultiLexSumAdapter:
             field_name="options.config_name",
             default=_DEFAULT_CONFIG_NAME,
         )
+        self.trust_remote_code = _bool_option(
+            self.options.get("trust_remote_code", True),
+            "options.trust_remote_code",
+        )
         self.max_cases = _optional_positive_int(self.options.get("max_cases"), "options.max_cases")
         self.max_source_documents = _optional_positive_int(
             self.options.get("max_source_documents"),
@@ -154,6 +158,7 @@ class MultiLexSumAdapter:
             kwargs["name"] = self.config_name
         if self.revision is not None:
             kwargs["revision"] = self.revision
+        kwargs["trust_remote_code"] = self.trust_remote_code
 
         if self.dataset_loader is not None:
             return self.dataset_loader("allenai/multi_lexsum", **kwargs)
@@ -609,3 +614,9 @@ def _parse_int(value: Any, field_name: str) -> int:
         return int(value)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{field_name} must be an integer") from exc
+
+
+def _bool_option(value: Any, field_name: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    raise ValueError(f"{field_name} must be a boolean")

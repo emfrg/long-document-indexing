@@ -85,7 +85,7 @@ def test_multilexsum_adapter_segments_selected_cases_and_generates_questions(
     assert calls == [
         (
             "allenai/multi_lexsum",
-            {"split": "test", "name": "v20230518"},
+            {"split": "test", "name": "v20230518", "trust_remote_code": True},
         )
     ]
     assert [corpus.id for corpus in loaded.corpora] == ["case-alpha"]
@@ -181,8 +181,10 @@ def test_multilexsum_casefile_smoke_config_is_benchmark_ready() -> None:
     assert config.dataset.question_set == Path.cwd() / "benchmarks/multilexsum/questions.json"
     assert config.dataset.case_manifest == Path.cwd() / "benchmarks/multilexsum/case-manifest.json"
     assert config.dataset.options["config_name"] == "v20230518"
+    assert config.dataset.options["trust_remote_code"] is True
     assert adapter.segment_tokens == 1200
     assert adapter.segment_overlap_tokens == 120
+    assert adapter.trust_remote_code is True
     assert config.answering.mode == "generated"
     assert config.systems == [
         "flat_vector",

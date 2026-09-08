@@ -17,6 +17,7 @@ dataset:
     has_reference_summaries: true
   options:
     config_name: v20230518
+    trust_remote_code: true
     segment_tokens: 1200
     segment_overlap_tokens: 120
 
