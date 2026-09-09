@@ -13,6 +13,10 @@ from long_document_indexing.evaluation.foundry import (
     run_foundry_managed_evaluation,
     write_foundry_evaluation_export,
 )
+from long_document_indexing.evaluation.foundry.managed import (
+    _managed_evaluator_config,
+    _resolved_azure_openai_endpoint,
+)
 from long_document_indexing.storage.artifacts import ArtifactStore
 
 
@@ -37,6 +41,7 @@ def test_foundry_managed_evaluation_plan_uses_export_paths_and_env_project(
         plan["azure_ai_project"] == "https://example.services.ai.azure.com/api/projects/project-a"
     )
     assert plan["managed_evaluators"] == ["f1", "rouge"]
+    assert plan["judge_model_config"] is None
     assert plan["evaluator_config"]["f1"]["column_mapping"] == {
         "response": "${data.response}",
         "ground_truth": "${data.ground_truth}",
@@ -74,6 +79,109 @@ def test_foundry_managed_evaluation_calls_injected_evaluate_and_writes_result(tm
     assert result.row_count == 1
     assert result.studio_url == "https://ai.azure.com/evaluations/run-alpha"
     assert (store.experiment_dir / config.evaluation.foundry.result_path).exists()
+
+
+def test_foundry_managed_evaluation_calls_injected_evaluate_with_rag_mappings(
+    tmp_path,
+) -> None:
+    config = _config(tmp_path)
+    foundry_config = config.evaluation.foundry.model_copy(
+        update={
+            "managed_evaluators": [
+                "groundedness",
+                "retrieval",
+                "document_retrieval",
+                "response_completeness",
+            ]
+        }
+    )
+    config = config.model_copy(
+        update={
+            "evaluation": config.evaluation.model_copy(update={"foundry": foundry_config})
+        }
+    )
+    store = ArtifactStore(config.storage.artifacts_dir, config.experiment.id)
+    _write_export(store, foundry_config)
+    calls: list[dict[str, Any]] = []
+
+    def fake_evaluate(**kwargs: Any) -> dict[str, Any]:
+        calls.append(kwargs)
+        return {"metrics": {"groundedness.gpt_groundedness": 4.0}, "rows": []}
+
+    result = run_foundry_managed_evaluation(
+        config=config,
+        store=store,
+        evaluate_fn=fake_evaluate,
+    )
+
+    assert sorted(calls[0]["evaluators"]) == [
+        "document_retrieval",
+        "groundedness",
+        "response_completeness",
+        "retrieval",
+    ]
+    assert calls[0]["evaluator_config"]["groundedness"]["column_mapping"] == {
+        "query": "${data.query}",
+        "response": "${data.response}",
+        "context": "${data.context}",
+    }
+    assert calls[0]["evaluator_config"]["document_retrieval"]["column_mapping"] == {
+        "retrieval_ground_truth": "${data.retrieval_ground_truth}",
+        "retrieved_documents": "${data.retrieved_documents}",
+    }
+    assert result.metrics == {"groundedness.gpt_groundedness": 4.0}
+
+
+def test_foundry_managed_evaluator_config_maps_rag_fields() -> None:
+    evaluator_config = _managed_evaluator_config(
+        [
+            "groundedness",
+            "relevance",
+            "retrieval",
+            "document_retrieval",
+            "response_completeness",
+            "qa",
+            "similarity",
+        ]
+    )
+
+    assert evaluator_config["relevance"]["column_mapping"] == {
+        "query": "${data.query}",
+        "response": "${data.response}",
+    }
+    assert evaluator_config["retrieval"]["column_mapping"] == {
+        "query": "${data.query}",
+        "context": "${data.context}",
+    }
+    assert evaluator_config["response_completeness"]["column_mapping"] == {
+        "response": "${data.response}",
+        "ground_truth": "${data.ground_truth}",
+    }
+    assert evaluator_config["qa"]["column_mapping"] == {
+        "query": "${data.query}",
+        "response": "${data.response}",
+        "context": "${data.context}",
+        "ground_truth": "${data.ground_truth}",
+    }
+    assert evaluator_config["similarity"]["column_mapping"] == {
+        "response": "${data.response}",
+        "ground_truth": "${data.ground_truth}",
+    }
+
+
+def test_foundry_managed_judge_endpoint_is_derived_from_generator_base_url() -> None:
+    assert (
+        _resolved_azure_openai_endpoint(
+            "https://example.services.ai.azure.com/openai/v1/responses"
+        )
+        == "https://example.services.ai.azure.com"
+    )
+    assert (
+        _resolved_azure_openai_endpoint(
+            "https://example.openai.azure.com/openai/deployments/gpt-5/responses"
+        )
+        == "https://example.openai.azure.com"
+    )
 
 
 def test_foundry_managed_evaluation_requires_exported_dataset(tmp_path) -> None:

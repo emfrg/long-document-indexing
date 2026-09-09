@@ -1,0 +1,103 @@
+experiment:
+  id: foundry-multilexsum-legal-rag-qa-smoke
+  mode: controlled_ablation
+  seed: 42
+  query_repetitions: 1
+
+dataset:
+  adapter: multilexsum
+  split: test
+  case_manifest: benchmarks/multilexsum/rag-qa-case-manifest.json
+  question_set: benchmarks/multilexsum/rag-qa.jsonl
+  capabilities:
+    has_expected_answers: true
+    has_relevant_documents: true
+    has_relevant_segments: true
+    has_evidence_spans: true
+    has_reference_summaries: false
+  options:
+    config_name: v20230518
+    trust_remote_code: true
+    segment_tokens: 1200
+    segment_overlap_tokens: 120
+
+models:
+  generator_provider: foundry
+  generator_api: ${FOUNDRY_GENERATOR_API:-responses}
+  generator_base_url: ${FOUNDRY_GENERATOR_BASE_URL}
+  generator_deployment: ${FOUNDRY_GENERATOR_DEPLOYMENT}
+  generator_api_key_env: AZURE_INFERENCE_CREDENTIAL
+  generator_auth_mode: api_key
+  generator_max_output_tokens: ${FOUNDRY_GENERATOR_MAX_OUTPUT_TOKENS:-12000}
+  generator_response_format: ${FOUNDRY_GENERATOR_RESPONSE_FORMAT:-structured}
+
+shared_pipeline:
+  segment_tokens: 6000
+  segment_overlap_tokens: 250
+  selected_documents: 2
+  retrieved_segments: 8
+
+workflow:
+  runner: local
+
+answering:
+  mode: generated
+
+systems:
+  - flat_vector
+  - stuffing
+  - map_reduce
+  - refine
+  - hierarchical_map
+  - outline_then_fill
+  - agentic_map
+
+run_control:
+  resume: true
+  max_model_calls: 800
+  max_total_tokens: 4000000
+
+evaluation:
+  local:
+    - map_schema_validity
+    - map_source_reference_validity
+    - map_compression_ratio
+    - map_completion_rate
+    - document_recall_at_1
+    - document_recall_at_3
+    - mrr
+    - required_document_coverage
+    - segment_recall_at_4
+    - context_precision_at_4
+    - context_recall_at_4
+    - evidence_quote_recall_at_4
+    - citation_precision
+    - citation_recall
+    - citation_support_rate
+    - invalid_citation_rate
+    - answer_reference_token_precision
+    - answer_reference_token_recall
+    - answer_reference_token_f1
+    - query_duration_ms
+    - tool_calls
+  foundry:
+    enabled: true
+    dataset_path: evaluations/foundry/dataset.jsonl
+    manifest_path: evaluations/foundry/manifest.json
+    result_path: evaluations/foundry/managed-result.json
+    evaluation_level: turn
+    evaluators:
+      - groundedness
+      - relevance
+      - retrieval
+      - document_retrieval
+      - response_completeness
+    managed_evaluators:
+      - groundedness
+      - relevance
+      - retrieval
+      - document_retrieval
+      - response_completeness
+
+storage:
+  artifacts_dir: artifacts

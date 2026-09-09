@@ -1,0 +1,12 @@
+{
+  "description": "Curated RAG-QA smoke slice over two Multi-LexSum civil-rights case files.",
+  "case_ids": [
+    "CJ-AL-0007",
+    "CJ-AL-0020"
+  ],
+  "max_source_documents": 8,
+  "selection_policy": "explicit_case_ids",
+  "source_dataset": "allenai/multi_lexsum",
+  "source_dataset_config": "v20230518",
+  "question_set": "rag-qa.jsonl"
+}

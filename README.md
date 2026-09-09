@@ -8,7 +8,7 @@ The repository is intentionally benchmark-first:
 2. Build one or more RAG system indexes.
 3. Run questions through each system.
 4. Persist standardized run records.
-5. Evaluate deterministic retrieval and citation metrics locally.
+5. Evaluate deterministic retrieval, evidence, and citation metrics locally.
 6. Export Foundry-ready evaluation datasets behind an adapter.
 
 The first milestone is local-only. It includes the canonical domain model, a JSONL smoke dataset, a simple lexical retrieval backend, a flat-vector-style baseline, and local metrics.
@@ -65,6 +65,12 @@ The default path is still local and deterministic: `generator_provider: fake` ru
 The real-model path is optional. Foundry/Azure OpenAI inference is isolated behind `TextGenerationClient`, and GPT-5-family structured generation uses the Responses API with Pydantic output contracts. API-key inference does not require Azure CLI login.
 
 The Foundry evaluation path is split deliberately. Local export writes JSONL datasets under ignored `artifacts/`; managed evaluation uses the Azure AI Evaluation SDK when requested. Logging managed results to a Foundry project requires a project endpoint and may require `az login`. `azd` is only needed for provisioning or hosted-agent workflows.
+
+The RAG evaluation path is intentionally concrete: use labeled questions with
+`relevant_document_ids`, `relevant_segment_ids`, and evidence quotes. Local metrics then
+score route quality, retrieved context quality, evidence quote recovery, citation target
+validity, and citation quote support. ROUGE/F1-style reference overlap remains useful as a
+secondary answer check, but it is not the primary RAG signal.
 
 ## Implemented Systems
 
@@ -184,7 +190,18 @@ export FOUNDRY_EVALUATION_PROJECT_ENDPOINT="https://<resource>.services.ai.azure
 uv run --python 3.13 --extra foundry --no-editable --reinstall-package long-document-indexing ldi evaluate-foundry-managed --config configs/experiments/enterprise-thin-slice.yaml
 ```
 
-The default managed evaluators are `f1` and `rouge`, which score `response` against `ground_truth`. If the SDK asks for Azure authentication when logging to a project, run `az login`. `azd` is only needed for provisioning or Foundry hosted-agent workflows, not for local export or dry-run planning.
+The default managed evaluators are `f1` and `rouge`, which score `response` against `ground_truth`. For RAG-labeled datasets, configure managed evaluators such as `groundedness`, `relevance`, `retrieval`, `document_retrieval`, and `response_completeness`; these consume the exported `query`, `response`, `context`, `retrieved_documents`, `retrieval_ground_truth`, and `ground_truth` fields. Model-judge evaluators use `models.judge_deployment` when set, otherwise `models.generator_deployment`, plus the normalized `models.generator_base_url`.
+
+Use `.env` for local settings:
+
+```bash
+FOUNDRY_EVALUATION_PROJECT_ENDPOINT="https://<resource>.services.ai.azure.com/api/projects/<project-name>"
+FOUNDRY_GENERATOR_BASE_URL="https://<resource>.services.ai.azure.com/openai/v1/"
+FOUNDRY_GENERATOR_DEPLOYMENT="<deployment-name>"
+AZURE_INFERENCE_CREDENTIAL="<api-key>"
+```
+
+If the SDK asks for Azure authentication when logging to a project, run `az login`. `azd` is only needed for provisioning or Foundry hosted-agent workflows, not for local export or dry-run planning.
 
 ## Foundry Portal Evals
 
@@ -196,6 +213,9 @@ uv run --python 3.13 --extra foundry --no-editable --reinstall-package long-docu
 ```
 
 This command reads `FOUNDRY_EVALUATION_PROJECT_ENDPOINT` from `.env`, uses the current Azure CLI login through `DefaultAzureCredential`, uploads an Evals-shaped JSONL file, and creates a Foundry Evals run. It currently maps configured `managed_evaluators` to native Evals graders: `f1` becomes deterministic token-F1, and `rouge` becomes ROUGE-1 text similarity. The command writes `evaluations/foundry/openai-evals-result.json`, including the Foundry `report_url`.
+
+For RAG-specific judge metrics, use `ldi evaluate-foundry-managed`; the portal-visible
+Evals publisher is currently a narrower scalar-score path.
 
 ## Multi-System Real Benchmark
 
@@ -226,6 +246,16 @@ uv run --python 3.13 --extra foundry --extra multilexsum --no-editable --reinsta
 ```
 
 Both configs use API-key auth, so Azure CLI login is not required. They enable resume and checkpoint reuse because real legal runs can span many model calls. Map artifacts record prompt-safety and source-reference normalization policy versions; stale map artifacts are rebuilt instead of silently reused.
+
+For proper legal RAG evaluation, use the curated QA overlay:
+
+```bash
+uv run --python 3.13 --extra foundry --extra multilexsum --no-editable --reinstall-package long-document-indexing ldi run --config configs/experiments/foundry-multilexsum-legal-rag-qa-smoke.yaml
+```
+
+This config uses evidence-labeled questions rather than whole-case summary prompts, so
+its report includes context precision/recall, evidence quote recall, citation precision,
+citation recall, and citation support rate.
 
 ## Enterprise Thin Slice Benchmark
 

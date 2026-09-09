@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -338,13 +339,60 @@ def _build_questions_from_templates(
 
 
 def _validate_question_scope(questions: list[BenchmarkItem], corpora: list[Corpus]) -> None:
-    corpus_ids = {corpus.id for corpus in corpora}
+    corpora_by_id = {corpus.id: corpus for corpus in corpora}
+    corpus_ids = set(corpora_by_id)
     unknown_corpus_ids = sorted({question.corpus_id for question in questions} - corpus_ids)
     if unknown_corpus_ids:
         raise ValueError(
             "question set references corpus ids not loaded by the Multi-LexSum adapter: "
             f"{unknown_corpus_ids}"
         )
+
+    for question in questions:
+        corpus = corpora_by_id[question.corpus_id]
+        documents = corpus.document_by_id()
+        segments = corpus.segment_by_id()
+        truth = question.ground_truth
+
+        referenced_document_ids = set(truth.relevant_document_ids)
+        referenced_document_ids.update(span.document_id for span in truth.evidence)
+        unknown_document_ids = sorted(referenced_document_ids - set(documents))
+        if unknown_document_ids:
+            raise ValueError(
+                f"question {question.id!r} references unknown document ids: "
+                f"{unknown_document_ids}"
+            )
+
+        referenced_segment_ids = set(truth.relevant_segment_ids)
+        referenced_segment_ids.update(
+            span.segment_id for span in truth.evidence if span.segment_id is not None
+        )
+        unknown_segment_ids = sorted(referenced_segment_ids - set(segments))
+        if unknown_segment_ids:
+            raise ValueError(
+                f"question {question.id!r} references unknown segment ids: "
+                f"{unknown_segment_ids}"
+            )
+
+        for span in truth.evidence:
+            if span.segment_id is None:
+                source_text = "\n".join(
+                    segment.text for segment in documents[span.document_id].segments
+                )
+            else:
+                segment = segments[span.segment_id]
+                if segment.document_id != span.document_id:
+                    raise ValueError(
+                        f"question {question.id!r} evidence span {span.segment_id!r} "
+                        f"does not belong to document {span.document_id!r}"
+                    )
+                source_text = segment.text
+
+            if span.quote and _normalized_text(span.quote) not in _normalized_text(source_text):
+                raise ValueError(
+                    f"question {question.id!r} evidence quote was not found in "
+                    f"{span.segment_id or span.document_id!r}"
+                )
 
 
 def _case_id(row: Mapping[str, Any]) -> str:
@@ -353,6 +401,10 @@ def _case_id(row: Mapping[str, Any]) -> str:
         if value is not None:
             return str(value)
     raise ValueError("Multi-LexSum row does not expose a recognizable case id")
+
+
+def _normalized_text(value: str) -> str:
+    return re.sub(r"\s+", " ", value).strip().lower()
 
 
 def _row_to_corpus(

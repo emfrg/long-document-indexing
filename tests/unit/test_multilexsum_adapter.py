@@ -4,9 +4,12 @@ import json
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from long_document_indexing.config import load_experiment_config
 from long_document_indexing.datasets.multilexsum import MultiLexSumAdapter
 from long_document_indexing.datasets.registry import create_dataset_adapter
+from long_document_indexing.domain.benchmark import DatasetCapabilities
 
 
 def test_multilexsum_adapter_segments_selected_cases_and_generates_questions(
@@ -170,6 +173,100 @@ def test_multilexsum_manifest_can_select_first_cases(tmp_path: Path) -> None:
     assert [item.corpus_id for item in loaded.question_set.items] == ["case-alpha"]
 
 
+def test_multilexsum_adapter_loads_curated_rag_qa_jsonl_with_evidence(
+    tmp_path: Path,
+) -> None:
+    questions_path = tmp_path / "legal-rag-qa.jsonl"
+    questions_path.write_text(
+        json.dumps(
+            {
+                "id": "case-alpha:qa_ability_to_pay",
+                "corpus_id": "case-alpha",
+                "query": "What inquiry did the order require before jailing people?",
+                "ground_truth": {
+                    "expected_answer": "The court required an ability-to-pay inquiry.",
+                    "relevant_document_ids": ["case-alpha:doc_0001"],
+                    "relevant_segment_ids": ["case-alpha:doc_0001:seg_0001"],
+                    "evidence": [
+                        {
+                            "document_id": "case-alpha:doc_0001",
+                            "segment_id": "case-alpha:doc_0001:seg_0001",
+                            "quote": "required an ability-to-pay inquiry",
+                        }
+                    ],
+                },
+                "tags": ["legal_rag_qa", "single_hop"],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    adapter = MultiLexSumAdapter(
+        question_set_path=questions_path,
+        capabilities=DatasetCapabilities(
+            has_expected_answers=True,
+            has_relevant_documents=True,
+            has_relevant_segments=True,
+            has_evidence_spans=True,
+        ),
+        options={"segment_tokens": 50, "segment_overlap_tokens": 0},
+        dataset_loader=lambda *_args, **_kwargs: [
+            {
+                "id": "case-alpha",
+                "sources": [
+                    "The order required an ability-to-pay inquiry before incarceration."
+                ],
+                "summary/long": "Alpha summary.",
+            }
+        ],
+    )
+
+    loaded = adapter.load()
+
+    question_set = loaded.question_set
+    assert question_set.metadata["question_format"] == "benchmark_jsonl"
+    assert question_set.capabilities.has_evidence_spans is True
+    question = question_set.items[0]
+    assert question.ground_truth.relevant_segment_ids == {"case-alpha:doc_0001:seg_0001"}
+    assert question.ground_truth.evidence[0].quote == "required an ability-to-pay inquiry"
+
+
+def test_multilexsum_adapter_rejects_curated_questions_with_bad_evidence(
+    tmp_path: Path,
+) -> None:
+    questions_path = tmp_path / "legal-rag-qa.jsonl"
+    questions_path.write_text(
+        json.dumps(
+            {
+                "id": "case-alpha:qa_bad",
+                "corpus_id": "case-alpha",
+                "query": "What did the order require?",
+                "ground_truth": {
+                    "expected_answer": "The court required an inquiry.",
+                    "relevant_document_ids": ["case-alpha:doc_0001"],
+                    "relevant_segment_ids": ["case-alpha:doc_0001:seg_missing"],
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    adapter = MultiLexSumAdapter(
+        question_set_path=questions_path,
+        options={"segment_tokens": 50, "segment_overlap_tokens": 0},
+        dataset_loader=lambda *_args, **_kwargs: [
+            {
+                "id": "case-alpha",
+                "sources": ["The order required an inquiry."],
+                "summary/long": "Alpha summary.",
+            }
+        ],
+    )
+
+    with pytest.raises(ValueError, match="unknown segment ids"):
+        adapter.load()
+
+
 def test_multilexsum_casefile_smoke_config_is_benchmark_ready() -> None:
     config = load_experiment_config(
         Path("configs/experiments/multilexsum-casefile-smoke.yaml"),
@@ -280,6 +377,36 @@ def test_foundry_multilexsum_clean_all_systems_config_is_bounded_real_run() -> N
     assert config.dataset.options["trust_remote_code"] is True
     assert config.evaluation.foundry.enabled is True
     assert config.evaluation.foundry.evaluators == ["groundedness", "relevance"]
+
+
+def test_foundry_multilexsum_legal_rag_qa_config_is_rag_labeled() -> None:
+    config = load_experiment_config(
+        Path("configs/experiments/foundry-multilexsum-legal-rag-qa-smoke.yaml"),
+        project_root=Path.cwd(),
+    )
+
+    assert config.experiment.id == "foundry-multilexsum-legal-rag-qa-smoke"
+    assert config.dataset.question_set == Path.cwd() / "benchmarks/multilexsum/rag-qa.jsonl"
+    assert (
+        config.dataset.case_manifest
+        == Path.cwd() / "benchmarks/multilexsum/rag-qa-case-manifest.json"
+    )
+    assert config.dataset.capabilities.has_expected_answers is True
+    assert config.dataset.capabilities.has_relevant_documents is True
+    assert config.dataset.capabilities.has_relevant_segments is True
+    assert config.dataset.capabilities.has_evidence_spans is True
+    assert config.dataset.capabilities.has_reference_summaries is False
+    assert "context_precision_at_4" in config.evaluation.local
+    assert "context_recall_at_4" in config.evaluation.local
+    assert "evidence_quote_recall_at_4" in config.evaluation.local
+    assert "citation_support_rate" in config.evaluation.local
+    assert config.evaluation.foundry.managed_evaluators == [
+        "groundedness",
+        "relevance",
+        "retrieval",
+        "document_retrieval",
+        "response_completeness",
+    ]
 
 
 def _words(prefix: str, count: int) -> str:

@@ -129,6 +129,29 @@ def test_report_scores_answer_reference_metrics_without_requiring_perfection() -
     assert "answer_reference_token_f1=0.4500" not in row.issues
 
 
+def test_report_groups_rag_specific_metrics() -> None:
+    bundle = build_report_bundle(
+        metrics=[
+            _metric("alpha", "context_precision_at_4", 0.75, level="retrieval"),
+            _metric("alpha", "context_recall_at_4", 0.5, level="retrieval"),
+            _metric("alpha", "evidence_quote_recall_at_4", 0.25, level="retrieval"),
+            _metric("alpha", "citation_support_rate", 1.0, level="answer"),
+        ],
+        run_records=[_run_record("alpha", status="succeeded")],
+        index_usage=[],
+        query_usage=[],
+    )
+
+    row = _system(bundle.system_rows, "alpha")
+
+    assert metric_group("context_precision_at_4") == "retrieval"
+    assert metric_group("evidence_quote_recall_at_4") == "retrieval"
+    assert metric_group("citation_support_rate") == "answer"
+    assert row.retrieval_score == pytest.approx(0.5)
+    assert row.answer_score == 1.0
+    assert "evidence_quote_recall_at_4=0.2500" in row.issues
+
+
 def _metric(system_id: str, name: str, value: float, *, level: str) -> MetricRecord:
     return MetricRecord(
         experiment_id="exp",

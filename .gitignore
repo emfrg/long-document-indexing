@@ -10,6 +10,7 @@
 !/.env.example
 
 /RUNNING_TUTORIAL.md
+/_reference/
 
 /artifacts/
 /results/*

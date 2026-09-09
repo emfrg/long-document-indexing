@@ -26,6 +26,7 @@ ANSWER_METRICS = {
     "answer_reference_token_recall",
     "citation_precision",
     "citation_recall",
+    "citation_support_rate",
     "invalid_citation_rate",
 }
 MAP_QUALITY_METRICS = {
@@ -40,6 +41,7 @@ QUALITY_ISSUE_THRESHOLDS = {
     "answer_reference_token_f1": 0.15,
     "answer_reference_token_precision": 0.2,
     "answer_reference_token_recall": 0.1,
+    "citation_support_rate": 0.8,
 }
 
 
@@ -326,7 +328,13 @@ def summarize_systems(
 def metric_group(metric_name: str) -> MetricGroup:
     if metric_name in ROUTING_METRICS:
         return "routing"
-    if metric_name in RETRIEVAL_METRICS or metric_name.startswith("segment_recall_at_"):
+    if (
+        metric_name in RETRIEVAL_METRICS
+        or metric_name.startswith("segment_recall_at_")
+        or metric_name.startswith("context_precision_at_")
+        or metric_name.startswith("context_recall_at_")
+        or metric_name.startswith("evidence_quote_recall_at_")
+    ):
         return "retrieval"
     if metric_name in ANSWER_METRICS or metric_name.startswith("answer_reference_"):
         return "answer"
@@ -387,10 +395,22 @@ def system_issues(
             if row.metric == "invalid_citation_rate" and row.mean > 0.0:
                 issues.append(f"{row.metric}={row.mean:.4f}")
             continue
-        threshold = QUALITY_ISSUE_THRESHOLDS.get(row.metric, 1.0)
+        threshold = quality_issue_threshold(row.metric)
         if is_quality_metric(row.metric) and row.mean < threshold:
             issues.append(f"{row.metric}={row.mean:.4f}")
     return issues
+
+
+def quality_issue_threshold(metric_name: str) -> float:
+    if metric_name in QUALITY_ISSUE_THRESHOLDS:
+        return QUALITY_ISSUE_THRESHOLDS[metric_name]
+    if metric_name.startswith("context_precision_at_"):
+        return 0.5
+    if metric_name.startswith("context_recall_at_"):
+        return 0.5
+    if metric_name.startswith("evidence_quote_recall_at_"):
+        return 0.5
+    return 1.0
 
 
 def is_quality_metric(metric_name: str) -> bool:

@@ -14,6 +14,12 @@ from long_document_indexing.evaluation.local.answers import (
     citation_recall,
     invalid_citation_rate,
 )
+from long_document_indexing.evaluation.local.rag import (
+    citation_support_rate,
+    context_precision_at_k,
+    context_recall_at_k,
+    evidence_quote_recall_at_k,
+)
 from long_document_indexing.evaluation.local.routing import (
     document_recall_at_k,
     mean_reciprocal_rank,
@@ -110,6 +116,24 @@ def _calculate_metric(
             record.retrieved_items, truth.relevant_segment_ids, k
         ), "retrieval"
 
+    if metric_name.startswith("context_precision_at_"):
+        if not (truth.relevant_segment_ids or truth.relevant_document_ids):
+            return None
+        k = int(metric_name.rsplit("_", maxsplit=1)[1])
+        return context_precision_at_k(record.retrieved_items, truth, k), "retrieval"
+
+    if metric_name.startswith("context_recall_at_"):
+        if not (truth.relevant_segment_ids or truth.relevant_document_ids):
+            return None
+        k = int(metric_name.rsplit("_", maxsplit=1)[1])
+        return context_recall_at_k(record.retrieved_items, truth, k), "retrieval"
+
+    if metric_name.startswith("evidence_quote_recall_at_"):
+        if not any(span.quote and span.quote.strip() for span in truth.evidence):
+            return None
+        k = int(metric_name.rsplit("_", maxsplit=1)[1])
+        return evidence_quote_recall_at_k(record.retrieved_items, truth.evidence, k), "retrieval"
+
     if metric_name == "citation_precision":
         if not (truth.relevant_document_ids or truth.relevant_segment_ids):
             return None
@@ -122,6 +146,9 @@ def _calculate_metric(
 
     if metric_name == "invalid_citation_rate":
         return invalid_citation_rate(record.citations, corpus), "answer"
+
+    if metric_name == "citation_support_rate":
+        return citation_support_rate(record.citations, corpus), "answer"
 
     if metric_name == "answer_reference_similarity":
         if not (truth.reference_summary or truth.expected_answer):

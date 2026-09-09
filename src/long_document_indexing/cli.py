@@ -620,7 +620,6 @@ def _evaluate_foundry_managed(
     dry_run: bool = False,
 ) -> None:
     store = _artifact_store(config)
-    _ensure_foundry_export(config, store)
     if dry_run:
         plan = build_foundry_managed_evaluation_plan(config=config, store=store)
         store.write_json("evaluations/foundry/managed-plan.json", plan)
@@ -636,6 +635,7 @@ def _evaluate_foundry_managed(
         )
         return
 
+    _ensure_foundry_export(config, store)
     result = run_foundry_managed_evaluation(config=config, store=store)
     typer.echo(f"Wrote Foundry managed evaluation result to {result.result_path}")
     if result.studio_url:
