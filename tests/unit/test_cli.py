@@ -36,6 +36,8 @@ def test_foundry_managed_dry_run_does_not_require_run_records(tmp_path: Path) ->
         "document_retrieval",
         "response_completeness",
     ]
+    assert plan["managed_execution"] == "sequential"
+    assert plan["managed_evaluator_delay_seconds"] == 5.0
     assert plan["evaluator_config"]["retrieval"]["column_mapping"] == {
         "query": "${data.query}",
         "context": "${data.context}",

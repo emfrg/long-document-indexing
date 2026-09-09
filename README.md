@@ -199,9 +199,24 @@ FOUNDRY_EVALUATION_PROJECT_ENDPOINT="https://<resource>.services.ai.azure.com/ap
 FOUNDRY_GENERATOR_BASE_URL="https://<resource>.services.ai.azure.com/openai/v1/"
 FOUNDRY_GENERATOR_DEPLOYMENT="<deployment-name>"
 AZURE_INFERENCE_CREDENTIAL="<api-key>"
+# Optional override when the judge deployment is a GPT-5/o-series reasoning model.
+FOUNDRY_EVALUATION_REASONING_MODEL="true"
 ```
 
-If the SDK asks for Azure authentication when logging to a project, run `az login`. `azd` is only needed for provisioning or Foundry hosted-agent workflows, not for local export or dry-run planning.
+When `models.judge_deployment` or `models.generator_deployment` looks like a GPT-5/o-series deployment, the managed-evaluation adapter marks Azure AI Evaluation SDK model judges as reasoning models. This makes the SDK use the parameter shape those models require. Set `FOUNDRY_EVALUATION_REASONING_MODEL=true` or `false` in `.env` only when you need to override auto-detection.
+
+The SDK's batch logs use "lines" to mean dataset rows. For example, `Finished 22 / 28 lines` means one evaluator has scored 22 of 28 exported rows. If multiple evaluator names advance at the same timestamp, the SDK is running evaluator batches concurrently.
+
+For RAG judge runs on low quota deployments, prefer sequential evaluator execution:
+
+```yaml
+evaluation:
+  foundry:
+    managed_execution: sequential
+    managed_evaluator_delay_seconds: 5
+```
+
+Sequential execution calls the SDK once per evaluator and merges the resulting metrics into the normal managed-result artifact. This reduces the largest request burst, though the SDK may still parallelize rows inside a single evaluator. If the SDK asks for Azure authentication when logging to a project, run `az login`. `azd` is only needed for provisioning or Foundry hosted-agent workflows, not for local export or dry-run planning. GPT-5-family judge runs can still hit Azure rate limits; the SDK retries, but low quota can make managed evaluation slower.
 
 ## Foundry Portal Evals
 

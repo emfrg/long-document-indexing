@@ -98,6 +98,8 @@ evaluation:
       - retrieval
       - document_retrieval
       - response_completeness
+    managed_execution: sequential
+    managed_evaluator_delay_seconds: 5
 
 storage:
   artifacts_dir: artifacts

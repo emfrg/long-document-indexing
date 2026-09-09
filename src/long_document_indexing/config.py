@@ -240,6 +240,8 @@ class FoundryEvaluationConfig(BaseModel):
         ]
     )
     managed_evaluators: list[str] = Field(default_factory=lambda: ["f1", "rouge"])
+    managed_execution: Literal["parallel", "sequential"] = "parallel"
+    managed_evaluator_delay_seconds: float = 0.0
     fail_on_evaluator_errors: bool = False
     tags: dict[str, str] = Field(default_factory=dict)
 
@@ -257,6 +259,13 @@ class FoundryEvaluationConfig(BaseModel):
     def _optional_strings_must_not_be_blank(cls, value: str | None) -> str | None:
         if value is not None and not value.strip():
             raise ValueError("value must not be blank")
+        return value
+
+    @field_validator("managed_evaluator_delay_seconds")
+    @classmethod
+    def _managed_evaluator_delay_must_not_be_negative(cls, value: float) -> float:
+        if value < 0:
+            raise ValueError("managed_evaluator_delay_seconds must not be negative")
         return value
 
     @field_validator("evaluators", "managed_evaluators")

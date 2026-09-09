@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 import pytest
 
-from long_document_indexing.config import FoundryEvaluationConfig, load_experiment_config
+from long_document_indexing.config import (
+    ExperimentConfig,
+    FoundryEvaluationConfig,
+    load_experiment_config,
+)
 from long_document_indexing.domain.benchmark import BenchmarkItem, GroundTruth
 from long_document_indexing.domain.runs import Citation, RagRunRecord, RetrievedItem, UsageRecord
 from long_document_indexing.evaluation.foundry import (
@@ -14,7 +20,9 @@ from long_document_indexing.evaluation.foundry import (
     write_foundry_evaluation_export,
 )
 from long_document_indexing.evaluation.foundry.managed import (
+    _is_reasoning_model_deployment,
     _managed_evaluator_config,
+    _managed_evaluators,
     _resolved_azure_openai_endpoint,
 )
 from long_document_indexing.storage.artifacts import ArtifactStore
@@ -41,6 +49,8 @@ def test_foundry_managed_evaluation_plan_uses_export_paths_and_env_project(
         plan["azure_ai_project"] == "https://example.services.ai.azure.com/api/projects/project-a"
     )
     assert plan["managed_evaluators"] == ["f1", "rouge"]
+    assert plan["managed_execution"] == "parallel"
+    assert plan["managed_evaluator_delay_seconds"] == 0.0
     assert plan["judge_model_config"] is None
     assert plan["evaluator_config"]["f1"]["column_mapping"] == {
         "response": "${data.response}",
@@ -132,6 +142,55 @@ def test_foundry_managed_evaluation_calls_injected_evaluate_with_rag_mappings(
     assert result.metrics == {"groundedness.gpt_groundedness": 4.0}
 
 
+def test_foundry_managed_evaluation_can_run_evaluators_sequentially(
+    tmp_path,
+) -> None:
+    config = _config(tmp_path)
+    foundry_config = config.evaluation.foundry.model_copy(
+        update={
+            "managed_evaluators": ["groundedness", "retrieval"],
+            "managed_execution": "sequential",
+        }
+    )
+    config = config.model_copy(
+        update={
+            "evaluation": config.evaluation.model_copy(update={"foundry": foundry_config})
+        }
+    )
+    store = ArtifactStore(config.storage.artifacts_dir, config.experiment.id)
+    _write_export(store, foundry_config)
+    calls: list[dict[str, Any]] = []
+
+    def fake_evaluate(**kwargs: Any) -> dict[str, Any]:
+        calls.append(kwargs)
+        evaluator_name = next(iter(kwargs["evaluators"]))
+        return {
+            "metrics": {f"{evaluator_name}.score": 1.0},
+            "rows": [{"id": f"row-{evaluator_name}"}],
+            "studio_url": f"https://ai.azure.com/evaluations/{evaluator_name}",
+        }
+
+    result = run_foundry_managed_evaluation(
+        config=config,
+        store=store,
+        evaluate_fn=fake_evaluate,
+    )
+
+    assert [list(call["evaluators"]) for call in calls] == [["groundedness"], ["retrieval"]]
+    assert calls[0]["evaluation_name"] == "foundry-eval-export-smoke-groundedness"
+    assert calls[1]["evaluation_name"] == "foundry-eval-export-smoke-retrieval"
+    assert calls[0]["tags"]["managed_evaluator"] == "groundedness"
+    assert calls[1]["tags"]["managed_evaluator"] == "retrieval"
+    assert result.metrics == {
+        "groundedness.score": 1.0,
+        "retrieval.score": 1.0,
+    }
+    assert result.row_count == 1
+    assert result.studio_url == "https://ai.azure.com/evaluations/groundedness"
+    assert result.metadata["managed_execution"] == "sequential"
+    assert len(result.metadata["evaluator_results"]) == 2
+
+
 def test_foundry_managed_evaluator_config_maps_rag_fields() -> None:
     evaluator_config = _managed_evaluator_config(
         [
@@ -184,6 +243,79 @@ def test_foundry_managed_judge_endpoint_is_derived_from_generator_base_url() -> 
     )
 
 
+def test_foundry_managed_evaluators_mark_gpt5_judge_as_reasoning_model(
+    monkeypatch,
+) -> None:
+    calls: dict[str, dict[str, Any]] = {}
+
+    fake_module = _fake_azure_evaluation_module(calls)
+    monkeypatch.setitem(sys.modules, "azure.ai.evaluation", fake_module)
+    monkeypatch.setenv("AZURE_INFERENCE_CREDENTIAL", "test-key")
+    config = ExperimentConfig.model_validate(
+        {
+            "experiment": {"id": "exp"},
+            "dataset": {"adapter": "jsonl"},
+            "models": {
+                "generator_provider": "foundry",
+                "generator_base_url": "https://example.services.ai.azure.com/openai/v1/",
+                "generator_deployment": "gpt-5-mini-doc-map-generator",
+            },
+            "systems": ["flat_vector"],
+        }
+    )
+
+    _managed_evaluators(
+        [
+            "groundedness",
+            "relevance",
+            "retrieval",
+            "response_completeness",
+            "document_retrieval",
+        ],
+        config=config,
+    )
+
+    assert calls["GroundednessEvaluator"]["kwargs"]["is_reasoning_model"] is True
+    assert calls["RelevanceEvaluator"]["kwargs"]["is_reasoning_model"] is True
+    assert calls["RetrievalEvaluator"]["kwargs"]["is_reasoning_model"] is True
+    assert calls["ResponseCompletenessEvaluator"]["kwargs"]["is_reasoning_model"] is True
+    assert calls["DocumentRetrievalEvaluator"]["kwargs"] == {}
+
+
+def test_foundry_managed_evaluators_allow_reasoning_model_override(
+    monkeypatch,
+) -> None:
+    calls: dict[str, dict[str, Any]] = {}
+
+    fake_module = _fake_azure_evaluation_module(calls)
+    monkeypatch.setitem(sys.modules, "azure.ai.evaluation", fake_module)
+    monkeypatch.setenv("AZURE_INFERENCE_CREDENTIAL", "test-key")
+    monkeypatch.setenv("FOUNDRY_EVALUATION_REASONING_MODEL", "false")
+    config = ExperimentConfig.model_validate(
+        {
+            "experiment": {"id": "exp"},
+            "dataset": {"adapter": "jsonl"},
+            "models": {
+                "generator_provider": "foundry",
+                "generator_base_url": "https://example.services.ai.azure.com/openai/v1/",
+                "generator_deployment": "gpt-5-mini-doc-map-generator",
+            },
+            "systems": ["flat_vector"],
+        }
+    )
+
+    _managed_evaluators(["groundedness"], config=config)
+
+    assert calls["GroundednessEvaluator"]["kwargs"]["is_reasoning_model"] is False
+
+
+def test_reasoning_model_deployment_detection() -> None:
+    assert _is_reasoning_model_deployment("gpt-5-mini-doc-map-generator") is True
+    assert _is_reasoning_model_deployment("judge-o3") is True
+    assert _is_reasoning_model_deployment("prod-gpt-4o-mini") is False
+    assert _is_reasoning_model_deployment("prod-judge") is False
+
+
 def test_foundry_managed_evaluation_requires_exported_dataset(tmp_path) -> None:
     config = _config(tmp_path)
     store = ArtifactStore(config.storage.artifacts_dir, config.experiment.id)
@@ -216,6 +348,37 @@ def _write_export(store: ArtifactStore, config: FoundryEvaluationConfig) -> None
         config=config,
         experiment_id="foundry-eval-export-smoke",
     )
+
+
+def _fake_azure_evaluation_module(calls: dict[str, dict[str, Any]]) -> ModuleType:
+    module = ModuleType("azure.ai.evaluation")
+
+    def evaluator_class(name: str):
+        class FakeEvaluator:
+            def __init__(self, *args: Any, **kwargs: Any) -> None:
+                calls[name] = {"args": args, "kwargs": kwargs}
+
+        FakeEvaluator.__name__ = name
+        return FakeEvaluator
+
+    for name in (
+        "BleuScoreEvaluator",
+        "DocumentRetrievalEvaluator",
+        "F1ScoreEvaluator",
+        "GleuScoreEvaluator",
+        "GroundednessEvaluator",
+        "MeteorScoreEvaluator",
+        "QAEvaluator",
+        "RelevanceEvaluator",
+        "ResponseCompletenessEvaluator",
+        "RetrievalEvaluator",
+        "RougeScoreEvaluator",
+        "SimilarityEvaluator",
+    ):
+        setattr(module, name, evaluator_class(name))
+
+    module.RougeType = type("RougeType", (), {"ROUGE_1": "rouge_1"})
+    return module
 
 
 def _item() -> BenchmarkItem:

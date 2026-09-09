@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import os
+import re
+import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
@@ -24,6 +26,12 @@ _DOCUMENT_RETRIEVAL_EVALUATORS = {"document_retrieval"}
 _SUPPORTED_MANAGED_EVALUATORS = (
     sorted(_TEXT_SCORE_EVALUATORS | _MODEL_JUDGE_EVALUATORS | _DOCUMENT_RETRIEVAL_EVALUATORS)
 )
+_REASONING_MODEL_DEPLOYMENT_PATTERN = re.compile(
+    r"(?:^|[^a-z0-9])(?:gpt[-_]?5|o[134])(?:$|[^a-z0-9])",
+    re.IGNORECASE,
+)
+_TRUTHY_ENV_VALUES = {"1", "true", "yes", "y", "on"}
+_FALSEY_ENV_VALUES = {"0", "false", "no", "n", "off"}
 
 
 class FoundryManagedEvaluationResult(BaseModel):
@@ -66,21 +74,53 @@ def run_foundry_managed_evaluation(
 
     azure_ai_project = _azure_ai_project(foundry_config)
     evaluation_name = foundry_config.evaluation_name or config.experiment.id
-    evaluators = (
-        _managed_evaluators(foundry_config.managed_evaluators, config=config)
-        if evaluate_fn is None
-        else _placeholder_evaluators(foundry_config.managed_evaluators)
-    )
-    evaluator_config = _managed_evaluator_config(foundry_config.managed_evaluators)
     evaluate = evaluate_fn or _load_evaluate()
-    result = evaluate(
-        data=str(dataset_path),
-        evaluators=evaluators,
+
+    if foundry_config.managed_execution == "sequential":
+        normalized = _run_managed_evaluators_sequentially(
+            config=config,
+            dataset_path=dataset_path,
+            result_path=result_path,
+            azure_ai_project=azure_ai_project,
+            evaluation_name=evaluation_name,
+            evaluate=evaluate,
+            use_placeholder_evaluators=evaluate_fn is not None,
+        )
+    else:
+        normalized = _run_managed_evaluators_in_parallel(
+            config=config,
+            dataset_path=dataset_path,
+            result_path=result_path,
+            azure_ai_project=azure_ai_project,
+            evaluation_name=evaluation_name,
+            evaluate=evaluate,
+            use_placeholder_evaluators=evaluate_fn is not None,
+        )
+    store.write_json(foundry_config.result_path, normalized)
+    return normalized
+
+
+def _run_managed_evaluators_in_parallel(
+    *,
+    config: ExperimentConfig,
+    dataset_path: Path,
+    result_path: Path,
+    azure_ai_project: str | None,
+    evaluation_name: str,
+    evaluate: Callable[..., Any],
+    use_placeholder_evaluators: bool,
+) -> FoundryManagedEvaluationResult:
+    foundry_config = config.evaluation.foundry
+    result = _call_evaluate(
+        evaluate=evaluate,
+        dataset_path=dataset_path,
+        evaluator_names=foundry_config.managed_evaluators,
         evaluation_name=evaluation_name,
-        evaluator_config=evaluator_config,
         azure_ai_project=azure_ai_project,
         fail_on_evaluator_errors=foundry_config.fail_on_evaluator_errors,
         tags=_evaluation_tags(config, foundry_config),
+        config=config,
+        use_placeholder_evaluators=use_placeholder_evaluators,
     )
     normalized = _normalize_result(
         result,
@@ -89,8 +129,115 @@ def run_foundry_managed_evaluation(
         result_path=result_path,
         azure_ai_project=azure_ai_project,
     )
-    store.write_json(foundry_config.result_path, normalized)
+    normalized.metadata["managed_execution"] = "parallel"
     return normalized
+
+
+def _run_managed_evaluators_sequentially(
+    *,
+    config: ExperimentConfig,
+    dataset_path: Path,
+    result_path: Path,
+    azure_ai_project: str | None,
+    evaluation_name: str,
+    evaluate: Callable[..., Any],
+    use_placeholder_evaluators: bool,
+) -> FoundryManagedEvaluationResult:
+    foundry_config = config.evaluation.foundry
+    metrics: dict[str, Any] = {}
+    row_count = 0
+    studio_url: str | None = None
+    oai_eval_run_ids: list[dict[str, str]] = []
+    evaluator_results: list[dict[str, Any]] = []
+
+    for index, evaluator_name in enumerate(foundry_config.managed_evaluators):
+        evaluator_evaluation_name = (
+            evaluation_name
+            if len(foundry_config.managed_evaluators) == 1
+            else f"{evaluation_name}-{_evaluation_name_slug(evaluator_name)}"
+        )
+        tags = _evaluation_tags(config, foundry_config)
+        tags["managed_evaluator"] = evaluator_name
+        result = _call_evaluate(
+            evaluate=evaluate,
+            dataset_path=dataset_path,
+            evaluator_names=[evaluator_name],
+            evaluation_name=evaluator_evaluation_name,
+            azure_ai_project=azure_ai_project,
+            fail_on_evaluator_errors=foundry_config.fail_on_evaluator_errors,
+            tags=tags,
+            config=config,
+            use_placeholder_evaluators=use_placeholder_evaluators,
+        )
+        normalized = _normalize_result(
+            result,
+            evaluation_name=evaluator_evaluation_name,
+            dataset_path=dataset_path,
+            result_path=result_path,
+            azure_ai_project=azure_ai_project,
+        )
+        metrics.update(normalized.metrics)
+        row_count = max(row_count, normalized.row_count)
+        studio_url = studio_url or normalized.studio_url
+        oai_eval_run_ids.extend(normalized.oai_eval_run_ids)
+        evaluator_results.append(
+            {
+                "evaluator": evaluator_name,
+                "evaluation_name": evaluator_evaluation_name,
+                "row_count": normalized.row_count,
+                "studio_url": normalized.studio_url,
+                "oai_eval_run_ids": normalized.oai_eval_run_ids,
+                "metrics": normalized.metrics,
+            }
+        )
+        should_delay = index < len(foundry_config.managed_evaluators) - 1
+        if should_delay and foundry_config.managed_evaluator_delay_seconds > 0:
+            time.sleep(foundry_config.managed_evaluator_delay_seconds)
+
+    return FoundryManagedEvaluationResult(
+        evaluation_name=evaluation_name,
+        dataset_path=str(dataset_path),
+        result_path=str(result_path),
+        azure_ai_project=azure_ai_project,
+        metrics=metrics,
+        row_count=row_count,
+        studio_url=studio_url,
+        oai_eval_run_ids=oai_eval_run_ids,
+        metadata={
+            "sdk_result_type": "sequential",
+            "managed_execution": "sequential",
+            "managed_evaluator_delay_seconds": foundry_config.managed_evaluator_delay_seconds,
+            "evaluator_results": evaluator_results,
+        },
+    )
+
+
+def _call_evaluate(
+    *,
+    evaluate: Callable[..., Any],
+    dataset_path: Path,
+    evaluator_names: list[str],
+    evaluation_name: str,
+    azure_ai_project: str | None,
+    fail_on_evaluator_errors: bool,
+    tags: dict[str, str],
+    config: ExperimentConfig,
+    use_placeholder_evaluators: bool,
+) -> Any:
+    evaluators = (
+        _placeholder_evaluators(evaluator_names)
+        if use_placeholder_evaluators
+        else _managed_evaluators(evaluator_names, config=config)
+    )
+    return evaluate(
+        data=str(dataset_path),
+        evaluators=evaluators,
+        evaluation_name=evaluation_name,
+        evaluator_config=_managed_evaluator_config(evaluator_names),
+        azure_ai_project=azure_ai_project,
+        fail_on_evaluator_errors=fail_on_evaluator_errors,
+        tags=tags,
+    )
 
 
 def build_foundry_managed_evaluation_plan(
@@ -113,6 +260,8 @@ def build_foundry_managed_evaluation_plan(
         "result_path": str(store.experiment_dir / foundry_config.result_path),
         "azure_ai_project": azure_ai_project,
         "managed_evaluators": foundry_config.managed_evaluators,
+        "managed_execution": foundry_config.managed_execution,
+        "managed_evaluator_delay_seconds": foundry_config.managed_evaluator_delay_seconds,
         "judge_model_config": _judge_model_config_plan(
             config.models,
             evaluator_names=foundry_config.managed_evaluators,
@@ -164,8 +313,12 @@ def _managed_evaluators(
         ) from exc
 
     model_config: dict[str, Any] | None = None
+    evaluator_kwargs: dict[str, Any] = {}
     if any(name.lower() in _MODEL_JUDGE_EVALUATORS for name in names):
         model_config = _required_judge_model_config(config.models)
+        evaluator_kwargs = {
+            "is_reasoning_model": _is_reasoning_model_judge(config.models),
+        }
 
     evaluators: dict[str, Callable[..., Any]] = {}
     for name in names:
@@ -181,19 +334,19 @@ def _managed_evaluators(
         elif key == "meteor":
             evaluators[name] = MeteorScoreEvaluator()
         elif key == "groundedness":
-            evaluators[name] = GroundednessEvaluator(model_config)
+            evaluators[name] = GroundednessEvaluator(model_config, **evaluator_kwargs)
         elif key == "relevance":
-            evaluators[name] = RelevanceEvaluator(model_config)
+            evaluators[name] = RelevanceEvaluator(model_config, **evaluator_kwargs)
         elif key == "retrieval":
-            evaluators[name] = RetrievalEvaluator(model_config)
+            evaluators[name] = RetrievalEvaluator(model_config, **evaluator_kwargs)
         elif key == "response_completeness":
-            evaluators[name] = ResponseCompletenessEvaluator(model_config)
+            evaluators[name] = ResponseCompletenessEvaluator(model_config, **evaluator_kwargs)
         elif key == "document_retrieval":
             evaluators[name] = DocumentRetrievalEvaluator()
         elif key == "qa":
-            evaluators[name] = QAEvaluator(model_config)
+            evaluators[name] = QAEvaluator(model_config, **evaluator_kwargs)
         elif key == "similarity":
-            evaluators[name] = SimilarityEvaluator(model_config)
+            evaluators[name] = SimilarityEvaluator(model_config, **evaluator_kwargs)
         else:
             raise ValueError(
                 f"unsupported managed evaluator {name!r}; "
@@ -286,6 +439,7 @@ def _judge_model_config_plan(
         else None,
         "api_key_configured": api_key_configured,
         "api_version": _evaluation_api_version(),
+        "is_reasoning_model": _is_reasoning_model_judge(config),
         "missing": _missing_judge_model_values(config),
     }
 
@@ -372,6 +526,32 @@ def _evaluation_api_version() -> str | None:
     return os.environ.get("FOUNDRY_EVALUATION_API_VERSION") or os.environ.get(
         "AZURE_OPENAI_API_VERSION"
     )
+
+
+def _evaluation_name_slug(value: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9_-]+", "-", value.strip()).strip("-") or "evaluator"
+
+
+def _is_reasoning_model_judge(config: ModelConfig) -> bool:
+    override = os.environ.get("FOUNDRY_EVALUATION_REASONING_MODEL")
+    if override is not None:
+        normalized = override.strip().lower()
+        if normalized in _TRUTHY_ENV_VALUES:
+            return True
+        if normalized in _FALSEY_ENV_VALUES:
+            return False
+        raise RuntimeError(
+            "FOUNDRY_EVALUATION_REASONING_MODEL must be true or false when set."
+        )
+
+    deployment = _resolved_string(config.judge_deployment or config.generator_deployment)
+    if deployment is None:
+        return False
+    return _is_reasoning_model_deployment(deployment)
+
+
+def _is_reasoning_model_deployment(deployment: str) -> bool:
+    return _REASONING_MODEL_DEPLOYMENT_PATTERN.search(deployment) is not None
 
 
 def _azure_ai_project(config: FoundryEvaluationConfig) -> str | None:

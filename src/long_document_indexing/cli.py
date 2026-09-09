@@ -629,6 +629,11 @@ def _evaluate_foundry_managed(
         typer.echo(f"Result: {plan['result_path']}")
         typer.echo(f"Azure AI project: {plan['azure_ai_project']}")
         typer.echo(f"Managed evaluators: {', '.join(plan['managed_evaluators'])}")
+        typer.echo(f"Managed execution: {plan['managed_execution']}")
+        typer.echo(
+            "Managed evaluator delay seconds: "
+            f"{plan['managed_evaluator_delay_seconds']}"
+        )
         typer.echo(
             "Wrote managed evaluation plan to "
             f"{store.path('evaluations/foundry/managed-plan.json')}"
