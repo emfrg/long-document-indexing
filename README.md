@@ -186,6 +186,17 @@ uv run --python 3.13 --extra foundry --no-editable --reinstall-package long-docu
 
 The default managed evaluators are `f1` and `rouge`, which score `response` against `ground_truth`. If the SDK asks for Azure authentication when logging to a project, run `az login`. `azd` is only needed for provisioning or Foundry hosted-agent workflows, not for local export or dry-run planning.
 
+## Foundry Portal Evals
+
+The Azure AI Evaluation SDK can upload completed evaluation results, but those uploaded runs may not appear as top-level rows in the Foundry Evaluations page. To create a portal-visible Foundry Evals parent and run from the exported JSONL dataset, use:
+
+```bash
+uv run --python 3.13 --extra foundry --no-editable --reinstall-package long-document-indexing ldi publish-foundry-evals --config configs/experiments/enterprise-thin-slice.yaml --dry-run
+uv run --python 3.13 --extra foundry --no-editable --reinstall-package long-document-indexing ldi publish-foundry-evals --config configs/experiments/enterprise-thin-slice.yaml
+```
+
+This command reads `FOUNDRY_EVALUATION_PROJECT_ENDPOINT` from `.env`, uses the current Azure CLI login through `DefaultAzureCredential`, uploads an Evals-shaped JSONL file, and creates a Foundry Evals run. It currently maps configured `managed_evaluators` to native Evals graders: `f1` becomes deterministic token-F1, and `rouge` becomes ROUGE-1 text similarity. The command writes `evaluations/foundry/openai-evals-result.json`, including the Foundry `report_url`.
+
 ## Multi-System Real Benchmark
 
 Milestone 9 runs the real GPT-5-family generator across all implemented systems on the smoke corpus:

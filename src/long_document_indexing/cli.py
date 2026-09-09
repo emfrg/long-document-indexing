@@ -20,7 +20,9 @@ from long_document_indexing.domain.runs import MetricRecord, RagRunRecord, Usage
 from long_document_indexing.evaluation.foundry import (
     FoundryEvaluationExport,
     build_foundry_managed_evaluation_plan,
+    build_foundry_openai_evals_plan,
     run_foundry_managed_evaluation,
+    run_foundry_openai_evals,
     write_foundry_evaluation_export,
 )
 from long_document_indexing.evaluation.local.maps import evaluate_index_artifact
@@ -74,6 +76,14 @@ DryRunBudgetFlag = Annotated[
 DryRunFlag = Annotated[
     bool,
     typer.Option("--dry-run", help="Print the planned operation without executing it."),
+]
+EvaluationNameOption = Annotated[
+    str | None,
+    typer.Option("--evaluation-name", help="Foundry Evals parent name to create or reuse."),
+]
+RunNameOption = Annotated[
+    str | None,
+    typer.Option("--run-name", help="Foundry Evals run name to create."),
 ]
 
 
@@ -139,6 +149,23 @@ def evaluate_foundry_managed(config: ConfigPath, dry_run: DryRunFlag = False) ->
     """Run Azure AI Evaluation SDK over the exported Foundry dataset."""
 
     _evaluate_foundry_managed(load_experiment_config(config), dry_run=dry_run)
+
+
+@app.command("publish-foundry-evals")
+def publish_foundry_evals(
+    config: ConfigPath,
+    dry_run: DryRunFlag = False,
+    evaluation_name: EvaluationNameOption = None,
+    run_name: RunNameOption = None,
+) -> None:
+    """Create a portal-visible Foundry Evals run from the exported dataset."""
+
+    _publish_foundry_evals(
+        load_experiment_config(config),
+        dry_run=dry_run,
+        evaluation_name=evaluation_name,
+        run_name=run_name,
+    )
 
 
 @app.command()
@@ -613,6 +640,48 @@ def _evaluate_foundry_managed(
     typer.echo(f"Wrote Foundry managed evaluation result to {result.result_path}")
     if result.studio_url:
         typer.echo(f"Foundry URL: {result.studio_url}")
+
+
+def _publish_foundry_evals(
+    config: ExperimentConfig,
+    *,
+    dry_run: bool = False,
+    evaluation_name: str | None = None,
+    run_name: str | None = None,
+) -> None:
+    store = _artifact_store(config)
+    _ensure_foundry_export(config, store)
+    if dry_run:
+        plan = build_foundry_openai_evals_plan(
+            config=config,
+            store=store,
+            evaluation_name=evaluation_name,
+            run_name=run_name,
+        )
+        store.write_json("evaluations/foundry/openai-evals-plan.json", plan)
+        typer.echo(f"Planned Foundry Evals publish for {plan['evaluation_name']}")
+        typer.echo(f"Run: {plan['run_name']}")
+        typer.echo(f"Dataset: {plan['dataset_path']}")
+        typer.echo(f"Upload dataset: {plan['run_dataset_path']}")
+        typer.echo(f"Result: {plan['result_path']}")
+        typer.echo(f"Project endpoint: {plan['project_endpoint']}")
+        typer.echo(
+            "Wrote Foundry Evals publish plan to "
+            f"{store.path('evaluations/foundry/openai-evals-plan.json')}"
+        )
+        return
+
+    result = run_foundry_openai_evals(
+        config=config,
+        store=store,
+        evaluation_name=evaluation_name,
+        run_name=run_name,
+    )
+    typer.echo(f"Wrote Foundry Evals result to {result.result_path}")
+    typer.echo(f"Foundry Evals status: {result.status}")
+    typer.echo(f"Rows: {result.row_count}")
+    if result.report_url:
+        typer.echo(f"Foundry report URL: {result.report_url}")
 
 
 def _ensure_foundry_export(config: ExperimentConfig, store: ArtifactStore) -> None:
