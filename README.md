@@ -207,7 +207,18 @@ When `models.judge_deployment` or `models.generator_deployment` looks like a GPT
 
 The SDK's batch logs use "lines" to mean dataset rows. For example, `Finished 22 / 28 lines` means one evaluator has scored 22 of 28 exported rows. If multiple evaluator names advance at the same timestamp, the SDK is running evaluator batches concurrently.
 
-For RAG judge runs on low quota deployments, prefer sequential evaluator execution:
+For RAG judge runs on adequately provisioned judge deployments, use concurrent evaluator execution:
+
+```yaml
+evaluation:
+  foundry:
+    managed_execution: parallel
+    managed_evaluator_delay_seconds: 0
+```
+
+This calls the Azure AI Evaluation SDK once with all configured evaluators. It is the faster path and matches the default RAG smoke configuration.
+
+For RAG judge runs on low quota deployments, switch to sequential evaluator execution:
 
 ```yaml
 evaluation:
@@ -227,10 +238,17 @@ uv run --python 3.13 --extra foundry --no-editable --reinstall-package long-docu
 uv run --python 3.13 --extra foundry --no-editable --reinstall-package long-document-indexing ldi publish-foundry-evals --config configs/experiments/enterprise-thin-slice.yaml
 ```
 
-This command reads `FOUNDRY_EVALUATION_PROJECT_ENDPOINT` from `.env`, uses the current Azure CLI login through `DefaultAzureCredential`, uploads an Evals-shaped JSONL file, and creates a Foundry Evals run. It currently maps configured `managed_evaluators` to native Evals graders: `f1` becomes deterministic token-F1, and `rouge` becomes ROUGE-1 text similarity. The command writes `evaluations/foundry/openai-evals-result.json`, including the Foundry `report_url`.
+This command reads `FOUNDRY_EVALUATION_PROJECT_ENDPOINT` from `.env`, uses the current Azure CLI login through `DefaultAzureCredential`, uploads an Evals-shaped JSONL file, and creates a Foundry Evals run. The command writes `evaluations/foundry/openai-evals-result.json`, including the Foundry `report_url`.
 
-For RAG-specific judge metrics, use `ldi evaluate-foundry-managed`; the portal-visible
-Evals publisher is currently a narrower scalar-score path.
+Use this portal-visible path whenever the goal is to inspect results in the Foundry Evaluations UI. It maps configured `managed_evaluators` to native Evals criteria: `f1` becomes deterministic token-F1, `rouge` becomes ROUGE-1 text similarity, and RAG evaluator names become deterministic Python graders over the exported RAG fields:
+
+- `groundedness` -> `citation_support_rate`
+- `relevance` -> `answer_reference_token_f1`
+- `retrieval` -> `context_precision_at_4`, `context_recall_at_4`, `evidence_quote_recall_at_4`
+- `document_retrieval` -> `document_retrieval_precision`, `document_retrieval_recall`
+- `response_completeness` -> `answer_reference_token_recall`
+
+Keep `ldi evaluate-foundry-managed` for backend SDK scoring and local artifacts. Do not rely on it for Foundry UI visibility.
 
 ## Multi-System Real Benchmark
 

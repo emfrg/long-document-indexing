@@ -40,6 +40,44 @@ def test_foundry_openai_evals_plan_uses_env_project(tmp_path, monkeypatch) -> No
     ]
 
 
+def test_foundry_openai_evals_plan_supports_rag_criteria(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv(
+        "FOUNDRY_EVALUATION_PROJECT_ENDPOINT",
+        "https://example.services.ai.azure.com/api/projects/project-a",
+    )
+    config = load_experiment_config(
+        Path("configs/experiments/foundry-multilexsum-legal-rag-qa-smoke.yaml"),
+        project_root=Path.cwd(),
+    )
+    config = config.model_copy(
+        update={
+            "storage": config.storage.model_copy(update={"artifacts_dir": tmp_path / "artifacts"})
+        }
+    )
+    store = ArtifactStore(config.storage.artifacts_dir, config.experiment.id)
+    _write_rag_dataset(store, config)
+
+    plan = build_foundry_openai_evals_plan(
+        config=config,
+        store=store,
+        evaluation_name="portal-rag-eval",
+        run_name="portal-rag-run",
+    )
+
+    assert plan["dataset_exists"] is True
+    assert [criterion["name"] for criterion in plan["testing_criteria"]] == [
+        "citation_support_rate",
+        "answer_reference_token_f1",
+        "context_precision_at_4",
+        "context_recall_at_4",
+        "evidence_quote_recall_at_4",
+        "document_retrieval_precision",
+        "document_retrieval_recall",
+        "answer_reference_token_recall",
+    ]
+    assert {criterion["type"] for criterion in plan["testing_criteria"]} == {"python"}
+
+
 def test_foundry_openai_evals_uploads_file_id_run_and_writes_result(tmp_path, monkeypatch) -> None:
     monkeypatch.setenv(
         "FOUNDRY_EVALUATION_PROJECT_ENDPOINT",
@@ -61,6 +99,10 @@ def test_foundry_openai_evals_uploads_file_id_run_and_writes_result(tmp_path, mo
 
     assert client.files.created_purpose == "evals"
     assert client.evals.created["name"] == "portal-eval"
+    assert (
+        "retrieved_context"
+        in client.evals.created["data_source_config"]["item_schema"]["properties"]
+    )
     assert client.evals.runs.created["eval_id"] == "eval-created"
     assert client.evals.runs.created["data_source"]["source"] == {
         "type": "file_id",
@@ -100,6 +142,61 @@ def _write_dataset(store: ArtifactStore, config) -> dict[str, Any]:
         "ground_truth": "The board approved the Alpha renewal.",
         "system_id": "stuffing",
         "item_id": "q_alpha",
+    }
+    store.write_jsonl(config.evaluation.foundry.dataset_path, [row])
+    return row
+
+
+def _write_rag_dataset(store: ArtifactStore, config) -> dict[str, Any]:
+    row = {
+        "id": "run-alpha",
+        "query": "What did the court require?",
+        "response": "The court required an ability-to-pay inquiry.",
+        "context": "[rank=1 document_id=doc segment_id=seg]\nability-to-pay inquiry",
+        "ground_truth": "The court required an ability-to-pay inquiry.",
+        "messages": [],
+        "retrieved_context": [
+            {
+                "document_id": "doc",
+                "segment_id": "seg",
+                "rank": 1,
+                "text": "ability-to-pay inquiry",
+                "retrieval_stage": "test",
+            }
+        ],
+        "retrieved_documents": [{"document_id": "doc", "rank": 1}],
+        "retrieval_ground_truth": [{"document_id": "doc", "query_relevance_label": 4}],
+        "citations": [
+            {
+                "document_id": "doc",
+                "segment_id": "seg",
+                "quote": "ability-to-pay inquiry",
+            }
+        ],
+        "expected_behavior": {
+            "expected_answer": "The court required an ability-to-pay inquiry.",
+            "relevant_document_ids": ["doc"],
+            "relevant_segment_ids": ["seg"],
+            "evidence": [
+                {
+                    "document_id": "doc",
+                    "segment_id": "seg",
+                    "quote": "ability-to-pay inquiry",
+                }
+            ],
+        },
+        "experiment_id": "exp",
+        "run_id": "run-alpha",
+        "system_id": "stuffing",
+        "corpus_id": "corpus",
+        "item_id": "q_alpha",
+        "repetition": 1,
+        "selected_document_ids": ["doc"],
+        "relevant_document_ids": ["doc"],
+        "relevant_segment_ids": ["seg"],
+        "tags": ["legal_rag_qa"],
+        "status": "succeeded",
+        "metadata": {},
     }
     store.write_jsonl(config.evaluation.foundry.dataset_path, [row])
     return row

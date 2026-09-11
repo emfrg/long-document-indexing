@@ -10,6 +10,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field
 
 from long_document_indexing.config import ExperimentConfig, FoundryEvaluationConfig
+from long_document_indexing.evaluation.foundry.adapter import foundry_item_schema
 from long_document_indexing.evaluation.foundry.managed import _azure_ai_project
 from long_document_indexing.storage.artifacts import ArtifactStore
 
@@ -36,6 +37,203 @@ def grade(sample, item):
         return 0.0
     precision = common / len(prediction)
     recall = common / len(reference)
+    return 2 * precision * recall / (precision + recall)
+""".strip()
+
+DOCUMENT_RETRIEVAL_PRECISION_GRADER_SOURCE = """
+def _document_ids(values):
+    ids = []
+    for value in values or []:
+        if isinstance(value, dict):
+            document_id = value.get("document_id")
+        else:
+            document_id = None
+        if document_id and document_id not in ids:
+            ids.append(document_id)
+    return ids
+
+
+def grade(sample, item):
+    retrieved = _document_ids(item.get("retrieved_documents"))
+    relevant = set(_document_ids(item.get("retrieval_ground_truth")))
+    if not retrieved:
+        return 0.0
+    if not relevant:
+        relevant = set(item.get("relevant_document_ids") or [])
+    if not relevant:
+        return 0.0
+    return len(set(retrieved) & relevant) / len(retrieved)
+""".strip()
+
+DOCUMENT_RETRIEVAL_RECALL_GRADER_SOURCE = """
+def _document_ids(values):
+    ids = []
+    for value in values or []:
+        if isinstance(value, dict):
+            document_id = value.get("document_id")
+        else:
+            document_id = None
+        if document_id and document_id not in ids:
+            ids.append(document_id)
+    return ids
+
+
+def grade(sample, item):
+    retrieved = set(_document_ids(item.get("retrieved_documents")))
+    relevant = set(_document_ids(item.get("retrieval_ground_truth")))
+    if not relevant:
+        relevant = set(item.get("relevant_document_ids") or [])
+    if not relevant:
+        return 0.0
+    return len(retrieved & relevant) / len(relevant)
+""".strip()
+
+CONTEXT_PRECISION_AT_4_GRADER_SOURCE = """
+def _relevant_ids(item):
+    segment_ids = set(item.get("relevant_segment_ids") or [])
+    if segment_ids:
+        return segment_ids, "segment_id"
+    return set(item.get("relevant_document_ids") or []), "document_id"
+
+
+def grade(sample, item):
+    relevant, id_key = _relevant_ids(item)
+    if not relevant:
+        return 0.0
+    hits = 0
+    precision_sum = 0.0
+    seen = set()
+    contexts = sorted(item.get("retrieved_context") or [], key=lambda row: row.get("rank", 0))
+    for rank, context in enumerate(contexts[:4], start=1):
+        context_id = context.get(id_key)
+        if not context_id or context_id in seen:
+            continue
+        seen.add(context_id)
+        if context_id not in relevant:
+            continue
+        hits += 1
+        precision_sum += hits / rank
+    if hits == 0:
+        return 0.0
+    return precision_sum / hits
+""".strip()
+
+CONTEXT_RECALL_AT_4_GRADER_SOURCE = """
+def _relevant_ids(item):
+    segment_ids = set(item.get("relevant_segment_ids") or [])
+    if segment_ids:
+        return segment_ids, "segment_id"
+    return set(item.get("relevant_document_ids") or []), "document_id"
+
+
+def grade(sample, item):
+    relevant, id_key = _relevant_ids(item)
+    if not relevant:
+        return 0.0
+    contexts = sorted(item.get("retrieved_context") or [], key=lambda row: row.get("rank", 0))
+    retrieved = {
+        context.get(id_key)
+        for context in contexts[:4]
+        if context.get(id_key)
+    }
+    return len(retrieved & relevant) / len(relevant)
+""".strip()
+
+EVIDENCE_QUOTE_RECALL_AT_4_GRADER_SOURCE = """
+import re
+
+
+def _normalize(value):
+    return re.sub(r"\\s+", " ", str(value or "")).strip().lower()
+
+
+def grade(sample, item):
+    evidence = (item.get("expected_behavior") or {}).get("evidence") or []
+    quotes = [_normalize(span.get("quote")) for span in evidence if span.get("quote")]
+    if not quotes:
+        return 0.0
+    contexts = sorted(item.get("retrieved_context") or [], key=lambda row: row.get("rank", 0))
+    texts = [_normalize(context.get("text")) for context in contexts[:4]]
+    hits = sum(1 for quote in quotes if any(quote in text for text in texts))
+    return hits / len(quotes)
+""".strip()
+
+CITATION_SUPPORT_RATE_GRADER_SOURCE = """
+import re
+
+
+def _normalize(value):
+    return re.sub(r"\\s+", " ", str(value or "")).strip().lower()
+
+
+def grade(sample, item):
+    citations = item.get("citations") or []
+    if not citations:
+        return 0.0
+    contexts = item.get("retrieved_context") or []
+    supported = 0
+    for citation in citations:
+        quote = _normalize(citation.get("quote"))
+        if not quote:
+            continue
+        for context in contexts:
+            if context.get("document_id") != citation.get("document_id"):
+                continue
+            citation_segment = citation.get("segment_id")
+            if citation_segment and context.get("segment_id") != citation_segment:
+                continue
+            if quote in _normalize(context.get("text")):
+                supported += 1
+                break
+    return supported / len(citations)
+""".strip()
+
+ANSWER_REFERENCE_TOKEN_RECALL_GRADER_SOURCE = """
+import collections
+import re
+
+
+def _tokens(value):
+    return re.findall(r"\\w+", str(value or "").lower())
+
+
+def grade(sample, item):
+    prediction = collections.Counter(_tokens(item.get("response")))
+    reference = collections.Counter(_tokens(item.get("ground_truth")))
+    reference_count = sum(reference.values())
+    if reference_count == 0:
+        return 0.0
+    overlap = sum(
+        min(prediction[token], reference[token])
+        for token in prediction.keys() & reference.keys()
+    )
+    return overlap / reference_count
+""".strip()
+
+ANSWER_REFERENCE_TOKEN_F1_GRADER_SOURCE = """
+import collections
+import re
+
+
+def _tokens(value):
+    return re.findall(r"\\w+", str(value or "").lower())
+
+
+def grade(sample, item):
+    prediction = collections.Counter(_tokens(item.get("response")))
+    reference = collections.Counter(_tokens(item.get("ground_truth")))
+    prediction_count = sum(prediction.values())
+    reference_count = sum(reference.values())
+    if prediction_count == 0 or reference_count == 0:
+        return 0.0
+    overlap = sum(
+        min(prediction[token], reference[token])
+        for token in prediction.keys() & reference.keys()
+    )
+    precision = overlap / prediction_count
+    recall = overlap / reference_count
+    if precision + recall == 0.0:
+        return 0.0
     return 2 * precision * recall / (precision + recall)
 """.strip()
 
@@ -183,17 +381,7 @@ def _get_or_create_eval(client: Any, *, config: ExperimentConfig, name: str) -> 
         name=name,
         data_source_config={
             "type": "custom",
-            "item_schema": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string"},
-                    "response": {"type": "string"},
-                    "ground_truth": {"type": "string"},
-                    "system_id": {"type": "string"},
-                    "item_id": {"type": "string"},
-                },
-                "required": ["query", "response", "ground_truth", "system_id", "item_id"],
-            },
+            "item_schema": foundry_item_schema(),
         },
         testing_criteria=_testing_criteria(foundry_config.managed_evaluators),
         metadata=_evaluation_metadata(config, foundry_config),
@@ -312,12 +500,80 @@ def _testing_criteria(names: list[str]) -> list[dict[str, Any]]:
                     "pass_threshold": 0.5,
                 }
             )
+        elif key == "document_retrieval":
+            criteria.extend(
+                [
+                    _python_criterion(
+                        name="document_retrieval_precision",
+                        source=DOCUMENT_RETRIEVAL_PRECISION_GRADER_SOURCE,
+                    ),
+                    _python_criterion(
+                        name="document_retrieval_recall",
+                        source=DOCUMENT_RETRIEVAL_RECALL_GRADER_SOURCE,
+                    ),
+                ]
+            )
+        elif key == "retrieval":
+            criteria.extend(
+                [
+                    _python_criterion(
+                        name="context_precision_at_4",
+                        source=CONTEXT_PRECISION_AT_4_GRADER_SOURCE,
+                    ),
+                    _python_criterion(
+                        name="context_recall_at_4",
+                        source=CONTEXT_RECALL_AT_4_GRADER_SOURCE,
+                    ),
+                    _python_criterion(
+                        name="evidence_quote_recall_at_4",
+                        source=EVIDENCE_QUOTE_RECALL_AT_4_GRADER_SOURCE,
+                    ),
+                ]
+            )
+        elif key == "groundedness":
+            criteria.append(
+                _python_criterion(
+                    name="citation_support_rate",
+                    source=CITATION_SUPPORT_RATE_GRADER_SOURCE,
+                    pass_threshold=0.8,
+                )
+            )
+        elif key == "response_completeness":
+            criteria.append(
+                _python_criterion(
+                    name="answer_reference_token_recall",
+                    source=ANSWER_REFERENCE_TOKEN_RECALL_GRADER_SOURCE,
+                )
+            )
+        elif key == "relevance":
+            criteria.append(
+                _python_criterion(
+                    name="answer_reference_token_f1",
+                    source=ANSWER_REFERENCE_TOKEN_F1_GRADER_SOURCE,
+                )
+            )
         else:
             raise ValueError(
                 f"unsupported portal-visible Foundry evaluator {name!r}; "
-                "supported values are f1, rouge, bleu, gleu, and meteor"
+                "supported values are f1, rouge, bleu, gleu, meteor, groundedness, "
+                "relevance, retrieval, document_retrieval, and response_completeness"
             )
     return criteria
+
+
+def _python_criterion(
+    *,
+    name: str,
+    source: str,
+    pass_threshold: float = 0.5,
+) -> dict[str, Any]:
+    return {
+        "type": "python",
+        "name": name,
+        "source": source,
+        "image_tag": "2025-05-08",
+        "pass_threshold": pass_threshold,
+    }
 
 
 def _normalize_result(
