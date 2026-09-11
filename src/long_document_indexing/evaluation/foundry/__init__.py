@@ -13,9 +13,11 @@ from long_document_indexing.evaluation.foundry.managed import (
     run_foundry_managed_evaluation,
 )
 from long_document_indexing.evaluation.foundry.openai_evals import (
+    FoundryOpenAIEvalsBatchResult,
     FoundryOpenAIEvalsResult,
     build_foundry_openai_evals_plan,
-    run_foundry_openai_evals,
+    run_foundry_openai_evals_for_system,
+    run_foundry_openai_evals_per_system,
 )
 
 __all__ = [
@@ -23,11 +25,13 @@ __all__ = [
     "FoundryEvaluationManifest",
     "FoundryEvaluationRow",
     "FoundryManagedEvaluationResult",
+    "FoundryOpenAIEvalsBatchResult",
     "FoundryOpenAIEvalsResult",
     "build_foundry_evaluation_rows",
     "build_foundry_managed_evaluation_plan",
     "build_foundry_openai_evals_plan",
     "run_foundry_managed_evaluation",
-    "run_foundry_openai_evals",
+    "run_foundry_openai_evals_for_system",
+    "run_foundry_openai_evals_per_system",
     "write_foundry_evaluation_export",
 ]

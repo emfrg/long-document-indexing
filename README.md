@@ -250,6 +250,14 @@ Use this portal-visible path whenever the goal is to inspect results in the Foun
 
 Keep `ldi evaluate-foundry-managed` for backend SDK scoring and local artifacts. Do not rely on it for Foundry UI visibility.
 
+For benchmark presentation, publish one Foundry run per system so the Foundry run table compares systems directly:
+
+```bash
+uv run --python 3.13 --extra foundry --extra multilexsum --no-editable --reinstall-package long-document-indexing ldi publish-foundry-evals --config configs/experiments/foundry-multilexsum-legal-rag-qa-smoke.yaml --evaluation-name ldi-multilexsum-legal-rag-qa-system-comparison --run-name legal-rag-smoke
+```
+
+This creates one run per `system_id`, named like `legal-rag-smoke-map_reduce`, `legal-rag-smoke-refine`, and so on. The Foundry publishing path is intentionally system-by-system because the benchmark exists to compare long-document indexing strategies.
+
 ## Multi-System Real Benchmark
 
 Milestone 9 runs the real GPT-5-family generator across all implemented systems on the smoke corpus:

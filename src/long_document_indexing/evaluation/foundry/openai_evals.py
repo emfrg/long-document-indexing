@@ -16,6 +16,9 @@ from long_document_indexing.storage.artifacts import ArtifactStore
 
 OPENAI_EVALS_DATASET_PATH = Path("evaluations/foundry/openai-evals-dataset.jsonl")
 OPENAI_EVALS_RESULT_PATH = Path("evaluations/foundry/openai-evals-result.json")
+OPENAI_EVALS_SYSTEM_RESULTS_PATH = Path(
+    "evaluations/foundry/openai-evals-system-results.json"
+)
 OPENAI_EVALS_TOKEN_SCOPE = "https://ai.azure.com/.default"
 
 TOKEN_F1_GRADER_SOURCE = """
@@ -245,6 +248,7 @@ class FoundryOpenAIEvalsResult(BaseModel):
     eval_id: str
     run_name: str
     run_id: str
+    system_id: str
     dataset_path: str
     run_dataset_path: str
     result_path: str
@@ -259,6 +263,18 @@ class FoundryOpenAIEvalsResult(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class FoundryOpenAIEvalsBatchResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    evaluation_name: str
+    result_path: str
+    project_endpoint: str
+    mode: str
+    row_count: int = 0
+    systems: list[str] = Field(default_factory=list)
+    results: list[FoundryOpenAIEvalsResult] = Field(default_factory=list)
+
+
 def build_foundry_openai_evals_plan(
     *,
     config: ExperimentConfig,
@@ -268,13 +284,29 @@ def build_foundry_openai_evals_plan(
 ) -> dict[str, Any]:
     foundry_config = config.evaluation.foundry
     dataset_path = store.experiment_dir / foundry_config.dataset_path
+    systems = _dataset_system_ids(dataset_path, configured_systems=config.systems)
     return {
         "evaluation_name": _openai_evaluation_name(config, evaluation_name),
-        "run_name": _openai_run_name(config, run_name),
+        "mode": "system_comparison",
         "dataset_path": str(dataset_path),
         "dataset_exists": dataset_path.exists(),
-        "run_dataset_path": str(store.experiment_dir / OPENAI_EVALS_DATASET_PATH),
-        "result_path": str(store.experiment_dir / OPENAI_EVALS_RESULT_PATH),
+        "result_path": str(store.experiment_dir / OPENAI_EVALS_SYSTEM_RESULTS_PATH),
+        "systems": systems,
+        "runs": [
+            {
+                "system_id": system_id,
+                "run_name": _openai_system_run_name(config, run_name, system_id),
+                "run_dataset_path": str(
+                    store.experiment_dir
+                    / _system_artifact_path(OPENAI_EVALS_DATASET_PATH, system_id)
+                ),
+                "result_path": str(
+                    store.experiment_dir
+                    / _system_artifact_path(OPENAI_EVALS_RESULT_PATH, system_id)
+                ),
+            }
+            for system_id in systems
+        ],
         "project_endpoint": _required_project_endpoint(foundry_config),
         "managed_evaluators": foundry_config.managed_evaluators,
         "testing_criteria": _testing_criteria(foundry_config.managed_evaluators),
@@ -282,14 +314,16 @@ def build_foundry_openai_evals_plan(
     }
 
 
-def run_foundry_openai_evals(
+def run_foundry_openai_evals_for_system(
     *,
     config: ExperimentConfig,
     store: ArtifactStore,
+    system_id: str,
     evaluation_name: str | None = None,
     run_name: str | None = None,
     client: Any | None = None,
     sleep_fn: Callable[[float], None] = time.sleep,
+    status_callback: Callable[[str], None] | None = None,
 ) -> FoundryOpenAIEvalsResult:
     foundry_config = config.evaluation.foundry
     project_endpoint = _required_project_endpoint(foundry_config)
@@ -302,36 +336,51 @@ def run_foundry_openai_evals(
 
     client = client or _build_openai_client(project_endpoint)
     name = _openai_evaluation_name(config, evaluation_name)
-    run_name = _openai_run_name(config, run_name)
+    run_name = run_name or _openai_system_run_name(config, None, system_id)
+    _emit_status(status_callback, f"Preparing evaluation: {name}")
     eval_obj = _get_or_create_eval(client, config=config, name=name)
+    eval_id = _get_required(eval_obj, "id")
+    run_dataset_artifact_path = _system_artifact_path(
+        OPENAI_EVALS_DATASET_PATH, system_id
+    )
+    result_artifact_path = _system_artifact_path(OPENAI_EVALS_RESULT_PATH, system_id)
+    _emit_status(status_callback, f"Preparing upload dataset: {run_dataset_artifact_path}")
     run_dataset_path = _write_openai_evals_dataset(
         source_path=dataset_path,
-        target_path=store.experiment_dir / OPENAI_EVALS_DATASET_PATH,
+        target_path=store.experiment_dir / run_dataset_artifact_path,
+        system_id=system_id,
     )
-    file_obj = _upload_file(client, run_dataset_path)
+    _emit_status(status_callback, "Uploading dataset and waiting for file processing")
+    file_obj = _upload_file(client, run_dataset_path, status_callback=status_callback)
+    file_id = _get_required(file_obj, "id")
+    _emit_status(status_callback, f"Creating run: {run_name}")
     run = client.evals.runs.create(
-        _get_required(eval_obj, "id"),
+        eval_id,
         name=run_name,
         data_source={
             "type": "jsonl",
             "source": {
                 "type": "file_id",
-                "id": _get_required(file_obj, "id"),
+                "id": file_id,
             },
         },
-        metadata=_evaluation_metadata(config, foundry_config),
+        metadata=_evaluation_metadata(config, foundry_config, system_id=system_id),
         timeout=120,
     )
+    run_id = _get_required(run, "id")
+    _emit_status(status_callback, f"Waiting for run to finish: {run_id}")
     run = _poll_run(
         client,
-        eval_id=_get_required(eval_obj, "id"),
-        run_id=_get_required(run, "id"),
+        eval_id=eval_id,
+        run_id=run_id,
         sleep_fn=sleep_fn,
+        status_callback=status_callback,
     )
+    _emit_status(status_callback, "Fetching output items")
     output_items = _list_output_items(
         client,
-        eval_id=_get_required(eval_obj, "id"),
-        run_id=_get_required(run, "id"),
+        eval_id=eval_id,
+        run_id=run_id,
     )
     result = _normalize_result(
         config=config,
@@ -342,12 +391,66 @@ def run_foundry_openai_evals(
         file_obj=file_obj,
         dataset_path=dataset_path,
         run_dataset_path=run_dataset_path,
-        result_path=store.experiment_dir / OPENAI_EVALS_RESULT_PATH,
+        result_path=store.experiment_dir / result_artifact_path,
         project_endpoint=project_endpoint,
         output_items=output_items,
+        system_id=system_id,
     )
-    store.write_json(OPENAI_EVALS_RESULT_PATH, result)
+    _emit_status(status_callback, f"Writing result: {result_artifact_path}")
+    store.write_json(result_artifact_path, result)
     return result
+
+
+def run_foundry_openai_evals_per_system(
+    *,
+    config: ExperimentConfig,
+    store: ArtifactStore,
+    evaluation_name: str | None = None,
+    run_name: str | None = None,
+    client: Any | None = None,
+    sleep_fn: Callable[[float], None] = time.sleep,
+    status_callback: Callable[[str], None] | None = None,
+) -> FoundryOpenAIEvalsBatchResult:
+    foundry_config = config.evaluation.foundry
+    project_endpoint = _required_project_endpoint(foundry_config)
+    dataset_path = store.experiment_dir / foundry_config.dataset_path
+    systems = _dataset_system_ids(dataset_path, configured_systems=config.systems)
+    if not systems:
+        raise RuntimeError(
+            "Foundry per-system publish requires exported rows with a system_id field."
+        )
+
+    client = client or _build_openai_client(project_endpoint)
+    name = _openai_evaluation_name(config, evaluation_name)
+    results: list[FoundryOpenAIEvalsResult] = []
+    for index, system_id in enumerate(systems, start=1):
+        _emit_status(
+            status_callback,
+            f"Publishing system {index}/{len(systems)}: {system_id}",
+        )
+        result = run_foundry_openai_evals_for_system(
+            config=config,
+            store=store,
+            system_id=system_id,
+            evaluation_name=name,
+            run_name=_openai_system_run_name(config, run_name, system_id),
+            client=client,
+            sleep_fn=sleep_fn,
+            status_callback=status_callback,
+        )
+        results.append(result)
+
+    batch_result = FoundryOpenAIEvalsBatchResult(
+        evaluation_name=name,
+        result_path=str(store.experiment_dir / OPENAI_EVALS_SYSTEM_RESULTS_PATH),
+        project_endpoint=project_endpoint,
+        mode="system_comparison",
+        row_count=sum(result.row_count for result in results),
+        systems=systems,
+        results=results,
+    )
+    store.write_json(OPENAI_EVALS_SYSTEM_RESULTS_PATH, batch_result)
+    return batch_result
 
 
 def _build_openai_client(project_endpoint: str) -> Any:
@@ -405,11 +508,20 @@ def _list_evals(client: Any) -> list[Any]:
             return items
 
 
-def _upload_file(client: Any, path: Path) -> Any:
+def _upload_file(
+    client: Any,
+    path: Path,
+    *,
+    status_callback: Callable[[str], None] | None = None,
+) -> Any:
     with path.open("rb") as handle:
         file_obj = client.files.create(file=handle, purpose="evals", timeout=300)
     wait_for_processing = getattr(client.files, "wait_for_processing", None)
     if callable(wait_for_processing):
+        _emit_status(
+            status_callback,
+            f"Waiting for uploaded file to process: {_get_required(file_obj, 'id')}",
+        )
         return wait_for_processing(
             _get_required(file_obj, "id"),
             poll_interval=2,
@@ -424,14 +536,29 @@ def _poll_run(
     eval_id: str,
     run_id: str,
     sleep_fn: Callable[[float], None],
+    status_callback: Callable[[str], None] | None = None,
 ) -> Any:
     terminal = {"completed", "failed", "canceled"}
+    last_status: str | None = None
+    last_report = 0.0
     for _ in range(60):
         run = client.evals.runs.retrieve(run_id, eval_id=eval_id)
-        if _get(run, "status") in terminal:
+        status = str(_get(run, "status"))
+        now = time.monotonic()
+        should_report = status != last_status or now - last_report >= 60
+        if should_report:
+            _emit_status(status_callback, f"Run status: {status}")
+            last_status = status
+            last_report = now
+        if status in terminal:
             return run
         sleep_fn(10)
     raise RuntimeError(f"Foundry eval run did not finish: {run_id}")
+
+
+def _emit_status(callback: Callable[[str], None] | None, message: str) -> None:
+    if callback is not None:
+        callback(message)
 
 
 def _list_output_items(client: Any, *, eval_id: str, run_id: str) -> list[Any]:
@@ -451,17 +578,60 @@ def _list_output_items(client: Any, *, eval_id: str, run_id: str) -> list[Any]:
             return items
 
 
-def _write_openai_evals_dataset(*, source_path: Path, target_path: Path) -> Path:
+def _write_openai_evals_dataset(
+    *,
+    source_path: Path,
+    target_path: Path,
+    system_id: str | None = None,
+) -> Path:
     target_path.parent.mkdir(parents=True, exist_ok=True)
+    row_count = 0
     with source_path.open(encoding="utf-8") as source, target_path.open(
         "w", encoding="utf-8"
     ) as target:
         for line in source:
             if not line.strip():
                 continue
-            target.write(json.dumps({"item": json.loads(line)}, sort_keys=True))
+            row = json.loads(line)
+            if system_id is not None and row.get("system_id") != system_id:
+                continue
+            target.write(json.dumps({"item": row}, sort_keys=True))
             target.write("\n")
+            row_count += 1
+    if system_id is not None and row_count == 0:
+        raise RuntimeError(
+            f"Foundry per-system publish found no exported rows for system {system_id!r}."
+        )
     return target_path
+
+
+def _dataset_system_ids(source_path: Path, *, configured_systems: list[str]) -> list[str]:
+    if not source_path.exists():
+        return []
+    observed: set[str] = set()
+    with source_path.open(encoding="utf-8") as source:
+        for line in source:
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            system_id = row.get("system_id")
+            if isinstance(system_id, str) and system_id:
+                observed.add(system_id)
+    ordered = [system_id for system_id in configured_systems if system_id in observed]
+    ordered.extend(sorted(observed - set(ordered)))
+    return ordered
+
+
+def _system_artifact_path(path: Path, system_id: str | None) -> Path:
+    if system_id is None:
+        return path
+    safe_system_id = "".join(
+        character if character.isalnum() or character in {"-", "_"} else "-"
+        for character in system_id
+    ).strip("-")
+    if not safe_system_id:
+        raise RuntimeError(f"invalid system id for Foundry artifact path: {system_id!r}")
+    return path.with_name(f"{path.stem}-{safe_system_id}{path.suffix}")
 
 
 def _testing_criteria(names: list[str]) -> list[dict[str, Any]]:
@@ -589,6 +759,7 @@ def _normalize_result(
     result_path: Path,
     project_endpoint: str,
     output_items: list[Any],
+    system_id: str,
 ) -> FoundryOpenAIEvalsResult:
     averages, ranges = _score_summary(output_items)
     return FoundryOpenAIEvalsResult(
@@ -596,6 +767,7 @@ def _normalize_result(
         eval_id=_get_required(eval_obj, "id"),
         run_name=run_name,
         run_id=_get_required(run, "id"),
+        system_id=system_id,
         dataset_path=str(dataset_path),
         run_dataset_path=str(run_dataset_path),
         result_path=str(result_path),
@@ -610,6 +782,7 @@ def _normalize_result(
         metadata={
             "experiment_id": config.experiment.id,
             "evaluator_path": "openai_evals",
+            "system_id": system_id,
         },
     )
 
@@ -637,20 +810,31 @@ def _openai_evaluation_name(config: ExperimentConfig, configured: str | None) ->
     return base
 
 
-def _openai_run_name(config: ExperimentConfig, configured: str | None) -> str:
-    return configured or f"{config.experiment.id}-precomputed-run"
+def _openai_system_run_name(
+    config: ExperimentConfig,
+    configured: str | None,
+    system_id: str,
+) -> str:
+    if configured is not None and "{system_id}" in configured:
+        return configured.format(system_id=system_id)
+    base = configured or f"{config.experiment.id}-precomputed-run"
+    return f"{base}-{system_id}"
 
 
 def _evaluation_metadata(
     config: ExperimentConfig,
     foundry_config: FoundryEvaluationConfig,
+    *,
+    system_id: str | None = None,
 ) -> dict[str, str]:
     metadata = {
         "experiment_id": config.experiment.id,
         "dataset_adapter": config.dataset.adapter,
-        "systems": ",".join(config.systems),
+        "systems": system_id or ",".join(config.systems),
         "trigger_type": "oneoff",
     }
+    if system_id is not None:
+        metadata["system_id"] = system_id
     metadata.update(foundry_config.tags)
     return metadata
 

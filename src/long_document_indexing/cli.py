@@ -22,7 +22,7 @@ from long_document_indexing.evaluation.foundry import (
     build_foundry_managed_evaluation_plan,
     build_foundry_openai_evals_plan,
     run_foundry_managed_evaluation,
-    run_foundry_openai_evals,
+    run_foundry_openai_evals_per_system,
     write_foundry_evaluation_export,
 )
 from long_document_indexing.evaluation.local.maps import evaluate_index_artifact
@@ -85,7 +85,6 @@ RunNameOption = Annotated[
     str | None,
     typer.Option("--run-name", help="Foundry Evals run name to create."),
 ]
-
 
 @app.command()
 def prepare(config: ConfigPath) -> None:
@@ -158,7 +157,7 @@ def publish_foundry_evals(
     evaluation_name: EvaluationNameOption = None,
     run_name: RunNameOption = None,
 ) -> None:
-    """Create a portal-visible Foundry Evals run from the exported dataset."""
+    """Create portal-visible Foundry Evals runs, one per benchmark system."""
 
     _publish_foundry_evals(
         load_experiment_config(config),
@@ -665,9 +664,11 @@ def _publish_foundry_evals(
         )
         store.write_json("evaluations/foundry/openai-evals-plan.json", plan)
         typer.echo(f"Planned Foundry Evals publish for {plan['evaluation_name']}")
-        typer.echo(f"Run: {plan['run_name']}")
+        typer.echo(f"Mode: {plan['mode']}")
+        typer.echo(f"Runs: {len(plan['runs'])}")
+        for run in plan["runs"]:
+            typer.echo(f"- {run['system_id']}: {run['run_name']}")
         typer.echo(f"Dataset: {plan['dataset_path']}")
-        typer.echo(f"Upload dataset: {plan['run_dataset_path']}")
         typer.echo(f"Result: {plan['result_path']}")
         typer.echo(f"Project endpoint: {plan['project_endpoint']}")
         typer.echo(
@@ -676,17 +677,23 @@ def _publish_foundry_evals(
         )
         return
 
-    result = run_foundry_openai_evals(
+    batch_result = run_foundry_openai_evals_per_system(
         config=config,
         store=store,
         evaluation_name=evaluation_name,
         run_name=run_name,
+        status_callback=lambda message: typer.echo(f"Foundry Evals: {message}"),
     )
-    typer.echo(f"Wrote Foundry Evals result to {result.result_path}")
-    typer.echo(f"Foundry Evals status: {result.status}")
-    typer.echo(f"Rows: {result.row_count}")
-    if result.report_url:
-        typer.echo(f"Foundry report URL: {result.report_url}")
+    typer.echo(f"Wrote Foundry Evals system results to {batch_result.result_path}")
+    typer.echo(f"Systems: {', '.join(batch_result.systems)}")
+    typer.echo(f"Rows: {batch_result.row_count}")
+    for result in batch_result.results:
+        typer.echo(
+            f"- {result.system_id}: {result.status}, rows={result.row_count}, "
+            f"run={result.run_name}"
+        )
+        if result.report_url:
+            typer.echo(f"  Foundry report URL: {result.report_url}")
 
 
 def _ensure_foundry_export(config: ExperimentConfig, store: ArtifactStore) -> None:

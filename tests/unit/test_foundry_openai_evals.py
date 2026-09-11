@@ -7,9 +7,10 @@ from typing import Any
 
 from long_document_indexing.config import load_experiment_config
 from long_document_indexing.evaluation.foundry.openai_evals import (
-    OPENAI_EVALS_DATASET_PATH,
+    OPENAI_EVALS_SYSTEM_RESULTS_PATH,
     build_foundry_openai_evals_plan,
-    run_foundry_openai_evals,
+    run_foundry_openai_evals_for_system,
+    run_foundry_openai_evals_per_system,
 )
 from long_document_indexing.storage.artifacts import ArtifactStore
 
@@ -31,7 +32,21 @@ def test_foundry_openai_evals_plan_uses_env_project(tmp_path, monkeypatch) -> No
     )
 
     assert plan["evaluation_name"] == "portal-eval"
-    assert plan["run_name"] == "portal-run"
+    assert plan["mode"] == "system_comparison"
+    assert plan["runs"] == [
+        {
+            "system_id": "stuffing",
+            "run_name": "portal-run-stuffing",
+            "run_dataset_path": str(
+                store.experiment_dir
+                / "evaluations/foundry/openai-evals-dataset-stuffing.jsonl"
+            ),
+            "result_path": str(
+                store.experiment_dir
+                / "evaluations/foundry/openai-evals-result-stuffing.json"
+            ),
+        }
+    ]
     assert plan["dataset_exists"] is True
     assert plan["project_endpoint"] == "https://example.services.ai.azure.com/api/projects/project-a"
     assert [criterion["name"] for criterion in plan["testing_criteria"]] == [
@@ -78,7 +93,9 @@ def test_foundry_openai_evals_plan_supports_rag_criteria(tmp_path, monkeypatch) 
     assert {criterion["type"] for criterion in plan["testing_criteria"]} == {"python"}
 
 
-def test_foundry_openai_evals_uploads_file_id_run_and_writes_result(tmp_path, monkeypatch) -> None:
+def test_foundry_openai_evals_for_system_uploads_file_id_run_and_writes_result(
+    tmp_path, monkeypatch
+) -> None:
     monkeypatch.setenv(
         "FOUNDRY_EVALUATION_PROJECT_ENDPOINT",
         "https://example.services.ai.azure.com/api/projects/project-a",
@@ -87,14 +104,17 @@ def test_foundry_openai_evals_uploads_file_id_run_and_writes_result(tmp_path, mo
     store = ArtifactStore(config.storage.artifacts_dir, config.experiment.id)
     row = _write_dataset(store, config)
     client = FakeOpenAIEvalsClient()
+    statuses: list[str] = []
 
-    result = run_foundry_openai_evals(
+    result = run_foundry_openai_evals_for_system(
         config=config,
         store=store,
+        system_id="stuffing",
         evaluation_name="portal-eval",
         run_name="portal-run",
         client=client,
         sleep_fn=lambda _: None,
+        status_callback=statuses.append,
     )
 
     assert client.files.created_purpose == "evals"
@@ -110,16 +130,96 @@ def test_foundry_openai_evals_uploads_file_id_run_and_writes_result(tmp_path, mo
     }
     assert result.eval_id == "eval-created"
     assert result.run_id == "run-created"
+    assert result.system_id == "stuffing"
     assert result.report_url == "https://ai.azure.com/report"
     assert result.score_averages == {"rouge_1": 0.25, "token_f1": 0.75}
-    assert (store.experiment_dir / "evaluations/foundry/openai-evals-result.json").exists()
+    assert (
+        store.experiment_dir / "evaluations/foundry/openai-evals-result-stuffing.json"
+    ).exists()
 
     run_dataset_row = json.loads(
-        (store.experiment_dir / OPENAI_EVALS_DATASET_PATH)
+        (store.experiment_dir / "evaluations/foundry/openai-evals-dataset-stuffing.jsonl")
         .read_text(encoding="utf-8")
         .splitlines()[0]
     )
     assert run_dataset_row == {"item": row}
+    assert statuses == [
+        "Preparing evaluation: portal-eval",
+        "Preparing upload dataset: evaluations/foundry/openai-evals-dataset-stuffing.jsonl",
+        "Uploading dataset and waiting for file processing",
+        "Waiting for uploaded file to process: file-created",
+        "Creating run: portal-run",
+        "Waiting for run to finish: run-created",
+        "Run status: completed",
+        "Fetching output items",
+        "Writing result: evaluations/foundry/openai-evals-result-stuffing.json",
+    ]
+
+
+def test_foundry_openai_evals_per_system_creates_run_per_system(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv(
+        "FOUNDRY_EVALUATION_PROJECT_ENDPOINT",
+        "https://example.services.ai.azure.com/api/projects/project-a",
+    )
+    config = _config(tmp_path)
+    store = ArtifactStore(config.storage.artifacts_dir, config.experiment.id)
+    rows = [
+        {
+            "id": "run-stuffing",
+            "query": "What did the board approve?",
+            "response": "The board approved the Alpha renewal.",
+            "ground_truth": "The board approved the Alpha renewal.",
+            "system_id": "stuffing",
+            "item_id": "q_alpha",
+        },
+        {
+            "id": "run-map-reduce",
+            "query": "What did the board approve?",
+            "response": "The board approved the Alpha renewal.",
+            "ground_truth": "The board approved the Alpha renewal.",
+            "system_id": "map_reduce",
+            "item_id": "q_alpha",
+        },
+    ]
+    store.write_jsonl(config.evaluation.foundry.dataset_path, rows)
+    client = FakeOpenAIEvalsClient()
+
+    result = run_foundry_openai_evals_per_system(
+        config=config,
+        store=store,
+        evaluation_name="system-comparison",
+        run_name="comparison",
+        client=client,
+        sleep_fn=lambda _: None,
+    )
+
+    assert result.mode == "system_comparison"
+    assert result.systems == ["stuffing", "map_reduce"]
+    assert [run.run_name for run in result.results] == [
+        "comparison-stuffing",
+        "comparison-map_reduce",
+    ]
+    assert [run.system_id for run in result.results] == ["stuffing", "map_reduce"]
+    assert [run["name"] for run in client.evals.runs.created_runs] == [
+        "comparison-stuffing",
+        "comparison-map_reduce",
+    ]
+    assert (
+        store.experiment_dir / OPENAI_EVALS_SYSTEM_RESULTS_PATH
+    ).exists()
+
+    stuffing_rows = (
+        store.experiment_dir / "evaluations/foundry/openai-evals-dataset-stuffing.jsonl"
+    ).read_text(encoding="utf-8")
+    map_reduce_rows = (
+        store.experiment_dir / "evaluations/foundry/openai-evals-dataset-map_reduce.jsonl"
+    ).read_text(encoding="utf-8")
+    assert '"system_id": "stuffing"' in stuffing_rows
+    assert '"system_id": "map_reduce"' not in stuffing_rows
+    assert '"system_id": "map_reduce"' in map_reduce_rows
+    assert '"system_id": "stuffing"' not in map_reduce_rows
 
 
 def _config(tmp_path):
@@ -246,10 +346,12 @@ class FakeEvals:
 class FakeRuns:
     def __init__(self) -> None:
         self.created: dict[str, Any] = {}
+        self.created_runs: list[dict[str, Any]] = []
         self.output_items = FakeOutputItems()
 
     def create(self, eval_id: str, **kwargs: Any) -> SimpleNamespace:
         self.created = {"eval_id": eval_id, **kwargs}
+        self.created_runs.append(self.created)
         return SimpleNamespace(id="run-created", status="queued")
 
     def retrieve(self, run_id: str, *, eval_id: str) -> SimpleNamespace:
