@@ -225,9 +225,14 @@ evaluation:
   foundry:
     managed_execution: sequential
     managed_evaluator_delay_seconds: 5
+    managed_max_attempts: 4
+    managed_retry_delay_seconds: 30
+    fail_on_evaluator_errors: true
 ```
 
-Sequential execution calls the SDK once per evaluator and merges the resulting metrics into the normal managed-result artifact. This reduces the largest request burst, though the SDK may still parallelize rows inside a single evaluator. If the SDK asks for Azure authentication when logging to a project, run `az login`. `azd` is only needed for provisioning or Foundry hosted-agent workflows, not for local export or dry-run planning. GPT-5-family judge runs can still hit Azure rate limits; the SDK retries, but low quota can make managed evaluation slower.
+Sequential execution calls the SDK once per evaluator and merges the resulting metrics into the normal managed-result artifact. Each evaluator is retried with exponential backoff and checkpointed only after every dataset row completes. Rerunning the same command reuses valid evaluator checkpoints. A partial result is never written as the final `managed-result.json`.
+
+This reduces the largest request burst, though the SDK may still parallelize rows inside a single evaluator. If the SDK asks for Azure authentication when logging to a project, run `az login`. `azd` is only needed for provisioning or Foundry hosted-agent workflows, not for local export or dry-run planning. GPT-5-family judge runs can still hit Azure rate limits; retries may make managed evaluation slower.
 
 ## Foundry Portal Evals
 
@@ -238,7 +243,9 @@ uv run --python 3.13 --extra foundry --no-editable --reinstall-package long-docu
 uv run --python 3.13 --extra foundry --no-editable --reinstall-package long-document-indexing ldi publish-foundry-evals --config configs/experiments/enterprise-thin-slice.yaml
 ```
 
-This command reads `FOUNDRY_EVALUATION_PROJECT_ENDPOINT` from `.env`, uses the current Azure CLI login through `DefaultAzureCredential`, uploads an Evals-shaped JSONL file, and creates a Foundry Evals run. The command writes `evaluations/foundry/openai-evals-result.json`, including the Foundry `report_url`.
+This command reads `FOUNDRY_EVALUATION_PROJECT_ENDPOINT` from `.env`, uses the current Azure CLI login through `DefaultAzureCredential`, uploads an Evals-shaped JSONL file, and creates one Foundry Evals run per system. It checkpoints an in-flight run's remote IDs, retries transient failures, rejects errored or incomplete rows, verifies every expected grader result, and writes per-system results plus `evaluations/foundry/openai-evals-system-results.json`.
+
+Rerun the exact same command, evaluation name, and run name after an interruption. Completed systems whose exported data is unchanged are reused; only missing or invalid systems are published again.
 
 Use this portal-visible path whenever the goal is to inspect results in the Foundry Evaluations UI. It maps configured `managed_evaluators` to native Evals criteria: `f1` becomes deterministic token-F1, `rouge` becomes ROUGE-1 text similarity, and RAG evaluator names become deterministic Python graders over the exported RAG fields:
 

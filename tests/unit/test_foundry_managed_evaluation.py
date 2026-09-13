@@ -51,6 +51,8 @@ def test_foundry_managed_evaluation_plan_uses_export_paths_and_env_project(
     assert plan["managed_evaluators"] == ["f1", "rouge"]
     assert plan["managed_execution"] == "parallel"
     assert plan["managed_evaluator_delay_seconds"] == 0.0
+    assert plan["managed_max_attempts"] == 3
+    assert plan["managed_retry_delay_seconds"] == 30.0
     assert plan["judge_model_config"] is None
     assert plan["evaluator_config"]["f1"]["column_mapping"] == {
         "response": "${data.response}",
@@ -133,7 +135,15 @@ def test_foundry_managed_evaluation_calls_injected_evaluate_with_rag_mappings(
 
     def fake_evaluate(**kwargs: Any) -> dict[str, Any]:
         calls.append(kwargs)
-        return {"metrics": {"groundedness.gpt_groundedness": 4.0}, "rows": []}
+        return {
+            "metrics": {
+                "groundedness.gpt_groundedness": 4.0,
+                "retrieval.retrieval": 4.0,
+                "document_retrieval.document_retrieval": 1.0,
+                "response_completeness.response_completeness": 4.0,
+            },
+            "rows": [{"id": "run-alpha"}],
+        }
 
     result = run_foundry_managed_evaluation(
         config=config,
@@ -156,7 +166,12 @@ def test_foundry_managed_evaluation_calls_injected_evaluate_with_rag_mappings(
         "retrieval_ground_truth": "${data.retrieval_ground_truth}",
         "retrieved_documents": "${data.retrieved_documents}",
     }
-    assert result.metrics == {"groundedness.gpt_groundedness": 4.0}
+    assert result.metrics == {
+        "groundedness.gpt_groundedness": 4.0,
+        "retrieval.retrieval": 4.0,
+        "document_retrieval.document_retrieval": 1.0,
+        "response_completeness.response_completeness": 4.0,
+    }
 
 
 def test_foundry_managed_evaluation_can_run_evaluators_sequentially(
@@ -206,6 +221,145 @@ def test_foundry_managed_evaluation_can_run_evaluators_sequentially(
     assert result.studio_url == "https://ai.azure.com/evaluations/groundedness"
     assert result.metadata["managed_execution"] == "sequential"
     assert len(result.metadata["evaluator_results"]) == 2
+
+
+def test_foundry_managed_evaluation_retries_transient_connection_errors(tmp_path) -> None:
+    config = _config(tmp_path)
+    foundry_config = config.evaluation.foundry.model_copy(
+        update={
+            "managed_evaluators": ["groundedness"],
+            "managed_max_attempts": 3,
+            "managed_retry_delay_seconds": 2.0,
+        }
+    )
+    config = config.model_copy(
+        update={
+            "evaluation": config.evaluation.model_copy(update={"foundry": foundry_config})
+        }
+    )
+    store = ArtifactStore(config.storage.artifacts_dir, config.experiment.id)
+    _write_export(store, foundry_config)
+    calls = 0
+    sleeps: list[float] = []
+
+    def fake_evaluate(**_: Any) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise RuntimeError("APIConnectionError: Connection error")
+        return {
+            "metrics": {"groundedness.groundedness": 4.0},
+            "rows": [{"id": "run-alpha"}],
+        }
+
+    result = run_foundry_managed_evaluation(
+        config=config,
+        store=store,
+        evaluate_fn=fake_evaluate,
+        sleep_fn=sleeps.append,
+    )
+
+    assert calls == 2
+    assert sleeps == [2.0]
+    assert result.metadata["attempts"] == 2
+    assert result.metadata["completion_status"] == "complete"
+
+
+def test_foundry_managed_evaluation_rejects_partial_results_after_retries(tmp_path) -> None:
+    config = _config(tmp_path)
+    foundry_config = config.evaluation.foundry.model_copy(
+        update={
+            "managed_evaluators": ["groundedness"],
+            "managed_max_attempts": 2,
+            "managed_retry_delay_seconds": 0.0,
+        }
+    )
+    config = config.model_copy(
+        update={
+            "evaluation": config.evaluation.model_copy(update={"foundry": foundry_config})
+        }
+    )
+    store = ArtifactStore(config.storage.artifacts_dir, config.experiment.id)
+    _write_export(store, foundry_config)
+    calls = 0
+
+    def fake_evaluate(**_: Any) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        return {"metrics": {"groundedness.groundedness": 4.0}, "rows": []}
+
+    with pytest.raises(RuntimeError, match="did not complete after 2 attempt"):
+        run_foundry_managed_evaluation(
+            config=config,
+            store=store,
+            evaluate_fn=fake_evaluate,
+            sleep_fn=lambda _: None,
+        )
+
+    assert calls == 2
+    assert not (store.experiment_dir / foundry_config.result_path).exists()
+
+
+def test_sequential_managed_evaluation_reuses_completed_evaluator_checkpoint(
+    tmp_path,
+) -> None:
+    config = _config(tmp_path)
+    foundry_config = config.evaluation.foundry.model_copy(
+        update={
+            "managed_evaluators": ["groundedness", "retrieval"],
+            "managed_execution": "sequential",
+            "managed_max_attempts": 1,
+        }
+    )
+    config = config.model_copy(
+        update={
+            "evaluation": config.evaluation.model_copy(update={"foundry": foundry_config})
+        }
+    )
+    store = ArtifactStore(config.storage.artifacts_dir, config.experiment.id)
+    _write_export(store, foundry_config)
+    first_calls: list[str] = []
+
+    def interrupted_evaluate(**kwargs: Any) -> dict[str, Any]:
+        evaluator_name = next(iter(kwargs["evaluators"]))
+        first_calls.append(evaluator_name)
+        if evaluator_name == "retrieval":
+            raise RuntimeError("APIConnectionError: Connection error")
+        return {
+            "metrics": {"groundedness.groundedness": 4.0},
+            "rows": [{"id": "run-alpha"}],
+        }
+
+    with pytest.raises(RuntimeError, match="retrieval did not complete"):
+        run_foundry_managed_evaluation(
+            config=config,
+            store=store,
+            evaluate_fn=interrupted_evaluate,
+            sleep_fn=lambda _: None,
+        )
+
+    assert first_calls == ["groundedness", "retrieval"]
+    second_calls: list[str] = []
+
+    def resumed_evaluate(**kwargs: Any) -> dict[str, Any]:
+        evaluator_name = next(iter(kwargs["evaluators"]))
+        second_calls.append(evaluator_name)
+        return {
+            "metrics": {"retrieval.retrieval": 4.0},
+            "rows": [{"id": "run-alpha"}],
+        }
+
+    result = run_foundry_managed_evaluation(
+        config=config,
+        store=store,
+        evaluate_fn=resumed_evaluate,
+        sleep_fn=lambda _: None,
+    )
+
+    assert second_calls == ["retrieval"]
+    assert result.metadata["completion_status"] == "complete"
+    assert result.metadata["evaluator_results"][0]["reused"] is True
+    assert result.metadata["evaluator_results"][1]["reused"] is False
 
 
 def test_foundry_managed_evaluator_config_maps_rag_fields() -> None:

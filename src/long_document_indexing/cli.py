@@ -676,6 +676,12 @@ def _evaluate_foundry_managed(
             "Managed evaluator delay seconds: "
             f"{plan['managed_evaluator_delay_seconds']}"
         )
+        typer.echo(f"Managed max attempts: {plan['managed_max_attempts']}")
+        typer.echo(
+            "Managed retry delay seconds: "
+            f"{plan['managed_retry_delay_seconds']}"
+        )
+        typer.echo(f"Fail on evaluator errors: {plan['fail_on_evaluator_errors']}")
         typer.echo(
             "Wrote managed evaluation plan to "
             f"{store.path('evaluations/foundry/managed-plan.json')}"
@@ -683,7 +689,11 @@ def _evaluate_foundry_managed(
         return
 
     _ensure_foundry_export(config, store)
-    result = run_foundry_managed_evaluation(config=config, store=store)
+    result = run_foundry_managed_evaluation(
+        config=config,
+        store=store,
+        status_callback=lambda message: typer.echo(f"Foundry managed: {message}"),
+    )
     typer.echo(f"Wrote Foundry managed evaluation result to {result.result_path}")
     if result.studio_url:
         typer.echo(f"Foundry URL: {result.studio_url}")
@@ -1290,6 +1300,7 @@ def _foundry_managed_result_matches_current_manifest(
     return bool(
         dataset_digest
         and result_metadata.get("dataset_sha256") == dataset_digest
+        and result_metadata.get("completion_status") == "complete"
     )
 
 

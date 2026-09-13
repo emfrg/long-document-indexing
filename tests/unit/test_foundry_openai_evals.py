@@ -5,9 +5,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from long_document_indexing.config import load_experiment_config
 from long_document_indexing.evaluation.foundry.openai_evals import (
     OPENAI_EVALS_SYSTEM_RESULTS_PATH,
+    FoundryOpenAIEvalsIncompleteError,
     build_foundry_openai_evals_plan,
     run_foundry_openai_evals_for_system,
     run_foundry_openai_evals_per_system,
@@ -133,6 +136,7 @@ def test_foundry_openai_evals_for_system_uploads_file_id_run_and_writes_result(
     assert result.system_id == "stuffing"
     assert result.report_url == "https://ai.azure.com/report"
     assert result.score_averages == {"rouge_1": 0.25, "token_f1": 0.75}
+    assert result.score_counts == {"rouge_1": 1, "token_f1": 1}
     assert (
         store.experiment_dir / "evaluations/foundry/openai-evals-result-stuffing.json"
     ).exists()
@@ -220,6 +224,122 @@ def test_foundry_openai_evals_per_system_creates_run_per_system(
     assert '"system_id": "map_reduce"' not in stuffing_rows
     assert '"system_id": "map_reduce"' in map_reduce_rows
     assert '"system_id": "stuffing"' not in map_reduce_rows
+
+
+def test_foundry_openai_evals_reuses_completed_system_result(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv(
+        "FOUNDRY_EVALUATION_PROJECT_ENDPOINT",
+        "https://example.services.ai.azure.com/api/projects/project-a",
+    )
+    config = _config(tmp_path)
+    store = ArtifactStore(config.storage.artifacts_dir, config.experiment.id)
+    _write_dataset(store, config)
+    client = FakeOpenAIEvalsClient()
+
+    first = run_foundry_openai_evals_per_system(
+        config=config,
+        store=store,
+        evaluation_name="portal-eval",
+        run_name="portal-run",
+        client=client,
+        sleep_fn=lambda _: None,
+    )
+    statuses: list[str] = []
+    second = run_foundry_openai_evals_per_system(
+        config=config,
+        store=store,
+        evaluation_name="portal-eval",
+        run_name="portal-run",
+        client=client,
+        sleep_fn=lambda _: None,
+        status_callback=statuses.append,
+    )
+
+    assert second == first
+    assert len(client.evals.runs.created_runs) == 1
+    assert statuses == [
+        "Publishing system 1/1: stuffing",
+        "Reusing completed system: stuffing",
+    ]
+
+
+def test_foundry_openai_evals_rejects_errored_rows(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv(
+        "FOUNDRY_EVALUATION_PROJECT_ENDPOINT",
+        "https://example.services.ai.azure.com/api/projects/project-a",
+    )
+    config = _config(tmp_path)
+    store = ArtifactStore(config.storage.artifacts_dir, config.experiment.id)
+    _write_dataset(store, config)
+    client = FakeOpenAIEvalsClient()
+    client.evals.runs.result_counts = SimpleNamespace(
+        total=1,
+        passed=0,
+        failed=0,
+        errored=1,
+    )
+
+    with pytest.raises(FoundryOpenAIEvalsIncompleteError, match="errored=1"):
+        run_foundry_openai_evals_for_system(
+            config=config,
+            store=store,
+            system_id="stuffing",
+            evaluation_name="portal-eval",
+            run_name="portal-run",
+            client=client,
+            sleep_fn=lambda _: None,
+        )
+
+
+def test_foundry_openai_evals_retries_connection_error(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv(
+        "FOUNDRY_EVALUATION_PROJECT_ENDPOINT",
+        "https://example.services.ai.azure.com/api/projects/project-a",
+    )
+    config = _config(tmp_path)
+    store = ArtifactStore(config.storage.artifacts_dir, config.experiment.id)
+    _write_dataset(store, config)
+    client = FakeOpenAIEvalsClient()
+    client.evals.runs.retrieve_failures_remaining = 1
+    sleeps: list[float] = []
+
+    result = run_foundry_openai_evals_per_system(
+        config=config,
+        store=store,
+        evaluation_name="portal-eval",
+        run_name="portal-run",
+        client=client,
+        sleep_fn=sleeps.append,
+    )
+
+    assert result.row_count == 1
+    assert len(client.evals.runs.created_runs) == 1
+    assert sleeps == [10.0]
+
+
+def test_foundry_openai_evals_rejects_missing_grader_result(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv(
+        "FOUNDRY_EVALUATION_PROJECT_ENDPOINT",
+        "https://example.services.ai.azure.com/api/projects/project-a",
+    )
+    config = _config(tmp_path)
+    store = ArtifactStore(config.storage.artifacts_dir, config.experiment.id)
+    _write_dataset(store, config)
+    client = FakeOpenAIEvalsClient()
+    client.evals.runs.output_items.results = [
+        SimpleNamespace(name="token_f1", score=0.75)
+    ]
+
+    with pytest.raises(FoundryOpenAIEvalsIncompleteError, match="rouge_1"):
+        run_foundry_openai_evals_for_system(
+            config=config,
+            store=store,
+            system_id="stuffing",
+            evaluation_name="portal-eval",
+            run_name="portal-run",
+            client=client,
+            sleep_fn=lambda _: None,
+        )
 
 
 def _config(tmp_path):
@@ -348,6 +468,8 @@ class FakeRuns:
         self.created: dict[str, Any] = {}
         self.created_runs: list[dict[str, Any]] = []
         self.output_items = FakeOutputItems()
+        self.result_counts = SimpleNamespace(total=1, passed=1, failed=0, errored=0)
+        self.retrieve_failures_remaining = 0
 
     def create(self, eval_id: str, **kwargs: Any) -> SimpleNamespace:
         self.created = {"eval_id": eval_id, **kwargs}
@@ -355,25 +477,31 @@ class FakeRuns:
         return SimpleNamespace(id="run-created", status="queued")
 
     def retrieve(self, run_id: str, *, eval_id: str) -> SimpleNamespace:
+        if self.retrieve_failures_remaining > 0:
+            self.retrieve_failures_remaining -= 1
+            raise RuntimeError("APIConnectionError: connection error")
         return SimpleNamespace(
             id=run_id,
             eval_id=eval_id,
             status="completed",
             report_url="https://ai.azure.com/report",
-            result_counts=SimpleNamespace(total=1, passed=1, failed=0, errored=0),
+            result_counts=self.result_counts,
         )
 
 
 class FakeOutputItems:
+    def __init__(self) -> None:
+        self.results = [
+            SimpleNamespace(name="token_f1", score=0.75),
+            SimpleNamespace(name="rouge_1", score=0.25),
+        ]
+
     def list(self, run_id: str, **kwargs: Any) -> SimpleNamespace:
         del run_id, kwargs
         return SimpleNamespace(
             data=[
                 SimpleNamespace(
-                    results=[
-                        SimpleNamespace(name="token_f1", score=0.75),
-                        SimpleNamespace(name="rouge_1", score=0.25),
-                    ]
+                    results=self.results
                 )
             ],
             has_more=False,

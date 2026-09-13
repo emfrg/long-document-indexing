@@ -102,8 +102,11 @@ evaluation:
       - retrieval
       - document_retrieval
       - response_completeness
-    managed_execution: parallel
-    managed_evaluator_delay_seconds: 0
+    managed_execution: sequential
+    managed_evaluator_delay_seconds: 5
+    managed_max_attempts: 4
+    managed_retry_delay_seconds: 30
+    fail_on_evaluator_errors: true
     tags:
       benchmark_variant: role-separated-v1
 

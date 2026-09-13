@@ -71,7 +71,7 @@ def test_report_loaders_ignore_stale_foundry_managed_result(tmp_path: Path) -> N
 
     store.write_json(
         config.evaluation.foundry.result_path,
-        {"metadata": {"dataset_sha256": "current"}},
+        {"metadata": {"dataset_sha256": "current", "completion_status": "complete"}},
     )
 
     assert _load_foundry_managed_result(config, store) is not None

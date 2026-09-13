@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import re
 import time
@@ -33,6 +35,25 @@ _REASONING_MODEL_DEPLOYMENT_PATTERN = re.compile(
 )
 _TRUTHY_ENV_VALUES = {"1", "true", "yes", "y", "on"}
 _FALSEY_ENV_VALUES = {"0", "false", "no", "n", "off"}
+_MANAGED_EVALUATOR_CHECKPOINT_DIR = Path("evaluations/foundry/managed-evaluators")
+_TRANSIENT_ERROR_MARKERS = (
+    "429",
+    "apiconnectionerror",
+    "apitimeouterror",
+    "connection error",
+    "connection reset",
+    "rate limit",
+    "readerror",
+    "readtimeout",
+    "service request error",
+    "service response error",
+    "temporarily unavailable",
+    "timeout",
+)
+
+
+class ManagedEvaluationIncompleteError(RuntimeError):
+    """Raised when an SDK result cannot prove complete evaluator coverage."""
 
 
 class FoundryManagedEvaluationResult(BaseModel):
@@ -54,6 +75,8 @@ def run_foundry_managed_evaluation(
     config: ExperimentConfig,
     store: ArtifactStore,
     evaluate_fn: Callable[..., Any] | None = None,
+    sleep_fn: Callable[[float], None] = time.sleep,
+    status_callback: Callable[[str], None] | None = None,
 ) -> FoundryManagedEvaluationResult:
     """Run Azure AI Evaluation SDK over an exported Foundry JSONL dataset."""
 
@@ -81,6 +104,13 @@ def run_foundry_managed_evaluation(
             "Foundry evaluation dataset does not match its manifest. "
             "Run `ldi evaluate` or `ldi export-foundry-eval` again."
         )
+    expected_row_count = _dataset_row_count(dataset_path)
+    manifest_row_count = manifest.get("row_count")
+    if manifest_row_count != expected_row_count:
+        raise ValueError(
+            "Foundry evaluation row count does not match its manifest. "
+            "Run `ldi evaluate` or `ldi export-foundry-eval` again."
+        )
 
     azure_ai_project = _azure_ai_project(foundry_config)
     evaluation_name = foundry_config.evaluation_name or config.experiment.id
@@ -95,6 +125,11 @@ def run_foundry_managed_evaluation(
             evaluation_name=evaluation_name,
             evaluate=evaluate,
             use_placeholder_evaluators=evaluate_fn is not None,
+            store=store,
+            dataset_sha256_value=actual_dataset_sha256,
+            expected_row_count=expected_row_count,
+            sleep_fn=sleep_fn,
+            status_callback=status_callback,
         )
     else:
         normalized = _run_managed_evaluators_in_parallel(
@@ -105,6 +140,9 @@ def run_foundry_managed_evaluation(
             evaluation_name=evaluation_name,
             evaluate=evaluate,
             use_placeholder_evaluators=evaluate_fn is not None,
+            expected_row_count=expected_row_count,
+            sleep_fn=sleep_fn,
+            status_callback=status_callback,
         )
     normalized.metadata["dataset_sha256"] = actual_dataset_sha256
     normalized.metadata["manifest_schema_version"] = manifest.get("schema_version")
@@ -115,6 +153,13 @@ def run_foundry_managed_evaluation(
         normalized.metadata["judge_deployment"] = _resolved_string(
             config.models.judge_deployment
         )
+    normalized.metadata["completion_status"] = "complete"
+    normalized.metadata["expected_row_count"] = expected_row_count
+    _validate_complete_managed_result(
+        normalized,
+        evaluator_names=foundry_config.managed_evaluators,
+        expected_row_count=expected_row_count,
+    )
     store.write_json(foundry_config.result_path, normalized)
     return normalized
 
@@ -128,27 +173,27 @@ def _run_managed_evaluators_in_parallel(
     evaluation_name: str,
     evaluate: Callable[..., Any],
     use_placeholder_evaluators: bool,
+    expected_row_count: int,
+    sleep_fn: Callable[[float], None],
+    status_callback: Callable[[str], None] | None,
 ) -> FoundryManagedEvaluationResult:
     foundry_config = config.evaluation.foundry
-    result = _call_evaluate(
+    normalized, attempts = _evaluate_with_retries(
+        config=config,
         evaluate=evaluate,
         dataset_path=dataset_path,
+        result_path=result_path,
         evaluator_names=foundry_config.managed_evaluators,
         evaluation_name=evaluation_name,
         azure_ai_project=azure_ai_project,
-        fail_on_evaluator_errors=foundry_config.fail_on_evaluator_errors,
         tags=_evaluation_tags(config, foundry_config),
-        config=config,
         use_placeholder_evaluators=use_placeholder_evaluators,
-    )
-    normalized = _normalize_result(
-        result,
-        evaluation_name=evaluation_name,
-        dataset_path=dataset_path,
-        result_path=result_path,
-        azure_ai_project=azure_ai_project,
+        expected_row_count=expected_row_count,
+        sleep_fn=sleep_fn,
+        status_callback=status_callback,
     )
     normalized.metadata["managed_execution"] = "parallel"
+    normalized.metadata["attempts"] = attempts
     return normalized
 
 
@@ -161,6 +206,11 @@ def _run_managed_evaluators_sequentially(
     evaluation_name: str,
     evaluate: Callable[..., Any],
     use_placeholder_evaluators: bool,
+    store: ArtifactStore,
+    dataset_sha256_value: str,
+    expected_row_count: int,
+    sleep_fn: Callable[[float], None],
+    status_callback: Callable[[str], None] | None,
 ) -> FoundryManagedEvaluationResult:
     foundry_config = config.evaluation.foundry
     metrics: dict[str, Any] = {}
@@ -177,24 +227,54 @@ def _run_managed_evaluators_sequentially(
         )
         tags = _evaluation_tags(config, foundry_config)
         tags["managed_evaluator"] = evaluator_name
-        result = _call_evaluate(
-            evaluate=evaluate,
-            dataset_path=dataset_path,
-            evaluator_names=[evaluator_name],
-            evaluation_name=evaluator_evaluation_name,
-            azure_ai_project=azure_ai_project,
-            fail_on_evaluator_errors=foundry_config.fail_on_evaluator_errors,
-            tags=tags,
+        checkpoint_signature = _managed_evaluator_signature(
             config=config,
-            use_placeholder_evaluators=use_placeholder_evaluators,
+            evaluator_name=evaluator_name,
+            dataset_sha256_value=dataset_sha256_value,
         )
-        normalized = _normalize_result(
-            result,
-            evaluation_name=evaluator_evaluation_name,
-            dataset_path=dataset_path,
-            result_path=result_path,
-            azure_ai_project=azure_ai_project,
+        checkpoint_path = _managed_evaluator_checkpoint_path(evaluator_name)
+        normalized = _load_managed_evaluator_checkpoint(
+            store=store,
+            checkpoint_path=checkpoint_path,
+            checkpoint_signature=checkpoint_signature,
+            evaluator_name=evaluator_name,
+            expected_row_count=expected_row_count,
         )
+        reused = normalized is not None
+        attempts = 0
+        if normalized is None:
+            _emit_status(
+                status_callback,
+                f"Running evaluator {index + 1}/{len(foundry_config.managed_evaluators)}: "
+                f"{evaluator_name}",
+            )
+            normalized, attempts = _evaluate_with_retries(
+                config=config,
+                evaluate=evaluate,
+                dataset_path=dataset_path,
+                result_path=result_path,
+                evaluator_names=[evaluator_name],
+                evaluation_name=evaluator_evaluation_name,
+                azure_ai_project=azure_ai_project,
+                tags=tags,
+                use_placeholder_evaluators=use_placeholder_evaluators,
+                expected_row_count=expected_row_count,
+                sleep_fn=sleep_fn,
+                status_callback=status_callback,
+            )
+            normalized.metadata.update(
+                {
+                    "checkpoint_signature": checkpoint_signature,
+                    "completion_status": "complete",
+                    "dataset_sha256": dataset_sha256_value,
+                    "evaluator": evaluator_name,
+                    "expected_row_count": expected_row_count,
+                }
+            )
+            store.write_json(checkpoint_path, normalized)
+            _emit_status(status_callback, f"Checkpointed evaluator: {evaluator_name}")
+        else:
+            _emit_status(status_callback, f"Reusing completed evaluator: {evaluator_name}")
         metrics.update(normalized.metrics)
         row_count = max(row_count, normalized.row_count)
         studio_url = studio_url or normalized.studio_url
@@ -207,11 +287,24 @@ def _run_managed_evaluators_sequentially(
                 "studio_url": normalized.studio_url,
                 "oai_eval_run_ids": normalized.oai_eval_run_ids,
                 "metrics": normalized.metrics,
+                "completion_status": "complete",
+                "checkpoint_path": str(store.experiment_dir / checkpoint_path),
+                "reused": reused,
+                "attempts": attempts,
             }
         )
         should_delay = index < len(foundry_config.managed_evaluators) - 1
-        if should_delay and foundry_config.managed_evaluator_delay_seconds > 0:
-            time.sleep(foundry_config.managed_evaluator_delay_seconds)
+        if (
+            not reused
+            and should_delay
+            and foundry_config.managed_evaluator_delay_seconds > 0
+        ):
+            _emit_status(
+                status_callback,
+                f"Waiting {foundry_config.managed_evaluator_delay_seconds:g}s before "
+                "the next evaluator",
+            )
+            sleep_fn(foundry_config.managed_evaluator_delay_seconds)
 
     return FoundryManagedEvaluationResult(
         evaluation_name=evaluation_name,
@@ -229,6 +322,180 @@ def _run_managed_evaluators_sequentially(
             "evaluator_results": evaluator_results,
         },
     )
+
+
+def _evaluate_with_retries(
+    *,
+    config: ExperimentConfig,
+    evaluate: Callable[..., Any],
+    dataset_path: Path,
+    result_path: Path,
+    evaluator_names: list[str],
+    evaluation_name: str,
+    azure_ai_project: str | None,
+    tags: dict[str, str],
+    use_placeholder_evaluators: bool,
+    expected_row_count: int,
+    sleep_fn: Callable[[float], None],
+    status_callback: Callable[[str], None] | None,
+) -> tuple[FoundryManagedEvaluationResult, int]:
+    foundry_config = config.evaluation.foundry
+    names = ", ".join(evaluator_names)
+    for attempt in range(1, foundry_config.managed_max_attempts + 1):
+        _emit_status(
+            status_callback,
+            f"Attempt {attempt}/{foundry_config.managed_max_attempts}: {names}",
+        )
+        try:
+            result = _call_evaluate(
+                evaluate=evaluate,
+                dataset_path=dataset_path,
+                evaluator_names=evaluator_names,
+                evaluation_name=evaluation_name,
+                azure_ai_project=azure_ai_project,
+                fail_on_evaluator_errors=foundry_config.fail_on_evaluator_errors,
+                tags=tags,
+                config=config,
+                use_placeholder_evaluators=use_placeholder_evaluators,
+            )
+            normalized = _normalize_result(
+                result,
+                evaluation_name=evaluation_name,
+                dataset_path=dataset_path,
+                result_path=result_path,
+                azure_ai_project=azure_ai_project,
+            )
+            _validate_complete_managed_result(
+                normalized,
+                evaluator_names=evaluator_names,
+                expected_row_count=expected_row_count,
+            )
+            _emit_status(status_callback, f"Completed evaluator(s): {names}")
+            return normalized, attempt
+        except Exception as exc:
+            can_retry = attempt < foundry_config.managed_max_attempts and (
+                isinstance(exc, ManagedEvaluationIncompleteError)
+                or _is_transient_managed_error(exc)
+            )
+            if not can_retry:
+                raise RuntimeError(
+                    f"managed evaluator(s) {names} did not complete after {attempt} "
+                    f"attempt(s): {exc}"
+                ) from exc
+            delay = foundry_config.managed_retry_delay_seconds * (2 ** (attempt - 1))
+            _emit_status(
+                status_callback,
+                f"Retrying evaluator(s) {names} after {delay:g}s "
+                f"(attempt {attempt + 1}/{foundry_config.managed_max_attempts})",
+            )
+            sleep_fn(delay)
+    raise AssertionError("managed evaluation retry loop terminated unexpectedly")
+
+
+def _validate_complete_managed_result(
+    result: FoundryManagedEvaluationResult,
+    *,
+    evaluator_names: list[str],
+    expected_row_count: int,
+) -> None:
+    if result.row_count != expected_row_count:
+        raise ManagedEvaluationIncompleteError(
+            f"expected {expected_row_count} rows, received {result.row_count}"
+        )
+    missing_metrics = [
+        evaluator_name
+        for evaluator_name in evaluator_names
+        if not _has_evaluator_metric(result.metrics, evaluator_name)
+    ]
+    if missing_metrics:
+        raise ManagedEvaluationIncompleteError(
+            "missing aggregate metrics for evaluator(s): " + ", ".join(missing_metrics)
+        )
+
+
+def _has_evaluator_metric(metrics: Mapping[str, Any], evaluator_name: str) -> bool:
+    prefix = f"{evaluator_name.lower()}."
+    return any(
+        str(name).lower() == evaluator_name.lower()
+        or str(name).lower().startswith(prefix)
+        for name in metrics
+    )
+
+
+def _is_transient_managed_error(exc: Exception) -> bool:
+    message = f"{exc.__class__.__name__}: {exc}".lower()
+    return any(marker in message for marker in _TRANSIENT_ERROR_MARKERS)
+
+
+def _emit_status(callback: Callable[[str], None] | None, message: str) -> None:
+    if callback is not None:
+        callback(message)
+
+
+def _dataset_row_count(path: Path) -> int:
+    with path.open(encoding="utf-8") as dataset:
+        return sum(1 for line in dataset if line.strip())
+
+
+def _managed_evaluator_checkpoint_path(evaluator_name: str) -> Path:
+    return _MANAGED_EVALUATOR_CHECKPOINT_DIR / f"{_evaluation_name_slug(evaluator_name)}.json"
+
+
+def _managed_evaluator_signature(
+    *,
+    config: ExperimentConfig,
+    evaluator_name: str,
+    dataset_sha256_value: str,
+) -> str:
+    payload = {
+        "dataset_sha256": dataset_sha256_value,
+        "evaluator": evaluator_name,
+        "evaluator_config": _managed_evaluator_config([evaluator_name]),
+        "judge_deployment": (
+            _resolved_string(config.models.judge_deployment)
+            if evaluator_name.lower() in _MODEL_JUDGE_EVALUATORS
+            else None
+        ),
+        "reasoning_model": (
+            _is_reasoning_model_judge(config.models)
+            if evaluator_name.lower() in _MODEL_JUDGE_EVALUATORS
+            else None
+        ),
+    }
+    digest = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return f"managed-evaluator-{digest[:16]}"
+
+
+def _load_managed_evaluator_checkpoint(
+    *,
+    store: ArtifactStore,
+    checkpoint_path: Path,
+    checkpoint_signature: str,
+    evaluator_name: str,
+    expected_row_count: int,
+) -> FoundryManagedEvaluationResult | None:
+    path = store.experiment_dir / checkpoint_path
+    if not path.exists():
+        return None
+    try:
+        result = FoundryManagedEvaluationResult.model_validate(store.read_json(checkpoint_path))
+    except (OSError, ValueError):
+        return None
+    if result.metadata.get("checkpoint_signature") != checkpoint_signature:
+        return None
+    if result.metadata.get("completion_status") != "complete":
+        return None
+    try:
+        _validate_complete_managed_result(
+            result,
+            evaluator_names=[evaluator_name],
+            expected_row_count=expected_row_count,
+        )
+    except ManagedEvaluationIncompleteError:
+        return None
+    return result
 
 
 def _call_evaluate(
@@ -281,6 +548,8 @@ def build_foundry_managed_evaluation_plan(
         "managed_evaluators": foundry_config.managed_evaluators,
         "managed_execution": foundry_config.managed_execution,
         "managed_evaluator_delay_seconds": foundry_config.managed_evaluator_delay_seconds,
+        "managed_max_attempts": foundry_config.managed_max_attempts,
+        "managed_retry_delay_seconds": foundry_config.managed_retry_delay_seconds,
         "judge_model_config": _judge_model_config_plan(
             config.models,
             evaluator_names=foundry_config.managed_evaluators,
