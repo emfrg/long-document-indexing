@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import re
 import time
+from collections import defaultdict
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
@@ -116,7 +118,23 @@ def run_foundry_managed_evaluation(
     evaluation_name = foundry_config.evaluation_name or config.experiment.id
     evaluate = evaluate_fn or _load_evaluate()
 
-    if foundry_config.managed_execution == "sequential":
+    if (
+        foundry_config.managed_group_by != "none"
+        or foundry_config.managed_sample_fraction < 1.0
+    ):
+        normalized, evaluated_row_count = _run_managed_evaluation_scopes(
+            config=config,
+            source_dataset_path=dataset_path,
+            result_path=result_path,
+            azure_ai_project=azure_ai_project,
+            evaluation_name=evaluation_name,
+            evaluate=evaluate,
+            use_placeholder_evaluators=evaluate_fn is not None,
+            store=store,
+            sleep_fn=sleep_fn,
+            status_callback=status_callback,
+        )
+    elif foundry_config.managed_execution == "sequential":
         normalized = _run_managed_evaluators_sequentially(
             config=config,
             dataset_path=dataset_path,
@@ -131,6 +149,7 @@ def run_foundry_managed_evaluation(
             sleep_fn=sleep_fn,
             status_callback=status_callback,
         )
+        evaluated_row_count = expected_row_count
     else:
         normalized = _run_managed_evaluators_in_parallel(
             config=config,
@@ -144,6 +163,7 @@ def run_foundry_managed_evaluation(
             sleep_fn=sleep_fn,
             status_callback=status_callback,
         )
+        evaluated_row_count = expected_row_count
     normalized.metadata["dataset_sha256"] = actual_dataset_sha256
     normalized.metadata["manifest_schema_version"] = manifest.get("schema_version")
     if any(
@@ -154,11 +174,12 @@ def run_foundry_managed_evaluation(
             config.models.judge_deployment
         )
     normalized.metadata["completion_status"] = "complete"
-    normalized.metadata["expected_row_count"] = expected_row_count
+    normalized.metadata["source_row_count"] = expected_row_count
+    normalized.metadata["expected_row_count"] = evaluated_row_count
     _validate_complete_managed_result(
         normalized,
         evaluator_names=foundry_config.managed_evaluators,
-        expected_row_count=expected_row_count,
+        expected_row_count=evaluated_row_count,
     )
     store.write_json(foundry_config.result_path, normalized)
     return normalized
@@ -176,6 +197,7 @@ def _run_managed_evaluators_in_parallel(
     expected_row_count: int,
     sleep_fn: Callable[[float], None],
     status_callback: Callable[[str], None] | None,
+    scope_tags: Mapping[str, str] | None = None,
 ) -> FoundryManagedEvaluationResult:
     foundry_config = config.evaluation.foundry
     normalized, attempts = _evaluate_with_retries(
@@ -186,7 +208,7 @@ def _run_managed_evaluators_in_parallel(
         evaluator_names=foundry_config.managed_evaluators,
         evaluation_name=evaluation_name,
         azure_ai_project=azure_ai_project,
-        tags=_evaluation_tags(config, foundry_config),
+        tags={**_evaluation_tags(config, foundry_config), **dict(scope_tags or {})},
         use_placeholder_evaluators=use_placeholder_evaluators,
         expected_row_count=expected_row_count,
         sleep_fn=sleep_fn,
@@ -211,6 +233,8 @@ def _run_managed_evaluators_sequentially(
     expected_row_count: int,
     sleep_fn: Callable[[float], None],
     status_callback: Callable[[str], None] | None,
+    checkpoint_group: str | None = None,
+    scope_tags: Mapping[str, str] | None = None,
 ) -> FoundryManagedEvaluationResult:
     foundry_config = config.evaluation.foundry
     metrics: dict[str, Any] = {}
@@ -225,14 +249,17 @@ def _run_managed_evaluators_sequentially(
             if len(foundry_config.managed_evaluators) == 1
             else f"{evaluation_name}-{_evaluation_name_slug(evaluator_name)}"
         )
-        tags = _evaluation_tags(config, foundry_config)
+        tags = {**_evaluation_tags(config, foundry_config), **dict(scope_tags or {})}
         tags["managed_evaluator"] = evaluator_name
         checkpoint_signature = _managed_evaluator_signature(
             config=config,
             evaluator_name=evaluator_name,
             dataset_sha256_value=dataset_sha256_value,
         )
-        checkpoint_path = _managed_evaluator_checkpoint_path(evaluator_name)
+        checkpoint_path = _managed_evaluator_checkpoint_path(
+            evaluator_name,
+            group=checkpoint_group,
+        )
         normalized = _load_managed_evaluator_checkpoint(
             store=store,
             checkpoint_path=checkpoint_path,
@@ -322,6 +349,240 @@ def _run_managed_evaluators_sequentially(
             "evaluator_results": evaluator_results,
         },
     )
+
+
+def _run_managed_evaluation_scopes(
+    *,
+    config: ExperimentConfig,
+    source_dataset_path: Path,
+    result_path: Path,
+    azure_ai_project: str | None,
+    evaluation_name: str,
+    evaluate: Callable[..., Any],
+    use_placeholder_evaluators: bool,
+    store: ArtifactStore,
+    sleep_fn: Callable[[float], None],
+    status_callback: Callable[[str], None] | None,
+) -> tuple[FoundryManagedEvaluationResult, int]:
+    foundry_config = config.evaluation.foundry
+    source_rows = _read_managed_dataset_rows(source_dataset_path)
+    sampled_rows, selected_item_ids = _sample_managed_rows(
+        source_rows,
+        fraction=foundry_config.managed_sample_fraction,
+        seed=foundry_config.managed_sample_seed,
+    )
+    rows_by_scope = _managed_rows_by_scope(
+        sampled_rows,
+        group_by=foundry_config.managed_group_by,
+    )
+    if foundry_config.managed_group_by == "system_id":
+        _validate_scope_item_coverage(rows_by_scope, selected_item_ids)
+    system_results: dict[str, Any] = {}
+    scoped_results: list[FoundryManagedEvaluationResult] = []
+
+    for scope_index, (scope_name, rows) in enumerate(sorted(rows_by_scope.items()), start=1):
+        scope_slug = _evaluation_name_slug(scope_name)
+        scope_dataset_path = store.write_jsonl(
+            Path("evaluations/foundry/managed-samples") / f"{scope_slug}.jsonl",
+            rows,
+        )
+        scope_evaluation_name = (
+            evaluation_name
+            if scope_name == "all"
+            else f"{evaluation_name}-{scope_slug}"
+        )
+        scope_tags = {
+            "managed_group_by": foundry_config.managed_group_by,
+            "managed_scope": scope_name,
+        }
+        _emit_status(
+            status_callback,
+            f"Running managed scope {scope_index}/{len(rows_by_scope)}: "
+            f"{scope_name} ({len(rows)} rows)",
+        )
+        if foundry_config.managed_execution == "sequential":
+            scoped = _run_managed_evaluators_sequentially(
+                config=config,
+                dataset_path=scope_dataset_path,
+                result_path=result_path,
+                azure_ai_project=azure_ai_project,
+                evaluation_name=scope_evaluation_name,
+                evaluate=evaluate,
+                use_placeholder_evaluators=use_placeholder_evaluators,
+                store=store,
+                dataset_sha256_value=dataset_sha256(scope_dataset_path),
+                expected_row_count=len(rows),
+                sleep_fn=sleep_fn,
+                status_callback=status_callback,
+                checkpoint_group=scope_name,
+                scope_tags=scope_tags,
+            )
+        else:
+            scoped = _run_managed_evaluators_in_parallel(
+                config=config,
+                dataset_path=scope_dataset_path,
+                result_path=result_path,
+                azure_ai_project=azure_ai_project,
+                evaluation_name=scope_evaluation_name,
+                evaluate=evaluate,
+                use_placeholder_evaluators=use_placeholder_evaluators,
+                expected_row_count=len(rows),
+                sleep_fn=sleep_fn,
+                status_callback=status_callback,
+                scope_tags=scope_tags,
+            )
+        scoped_results.append(scoped)
+        system_results[scope_name] = {
+            "dataset_path": str(scope_dataset_path),
+            "evaluation_name": scoped.evaluation_name,
+            "metrics": scoped.metrics,
+            "row_count": scoped.row_count,
+            "studio_url": scoped.studio_url,
+            "oai_eval_run_ids": scoped.oai_eval_run_ids,
+            "metadata": scoped.metadata,
+        }
+
+    evaluated_row_count = sum(result.row_count for result in scoped_results)
+    return (
+        FoundryManagedEvaluationResult(
+            evaluation_name=evaluation_name,
+            dataset_path=str(source_dataset_path),
+            result_path=str(result_path),
+            azure_ai_project=azure_ai_project,
+            metrics=_mean_managed_metrics(scoped_results),
+            row_count=evaluated_row_count,
+            studio_url=next(
+                (result.studio_url for result in scoped_results if result.studio_url),
+                None,
+            ),
+            oai_eval_run_ids=[
+                run_id
+                for result in scoped_results
+                for run_id in result.oai_eval_run_ids
+            ],
+            metadata={
+                "sdk_result_type": "scoped",
+                "managed_execution": foundry_config.managed_execution,
+                "managed_group_by": foundry_config.managed_group_by,
+                "managed_sample_fraction": foundry_config.managed_sample_fraction,
+                "managed_sample_seed": foundry_config.managed_sample_seed,
+                "selected_item_count": len(selected_item_ids),
+                "selected_item_ids": selected_item_ids,
+                "scope_results": system_results,
+            },
+        ),
+        evaluated_row_count,
+    )
+
+
+def _read_managed_dataset_rows(path: Path) -> list[dict[str, Any]]:
+    rows = []
+    with path.open(encoding="utf-8") as dataset:
+        for line_number, line in enumerate(dataset, start=1):
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            if not isinstance(row, dict):
+                raise ValueError(f"managed dataset row {line_number} must be an object")
+            rows.append(row)
+    return rows
+
+
+def _sample_managed_rows(
+    rows: list[dict[str, Any]],
+    *,
+    fraction: float,
+    seed: int,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    items: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        item_id = str(row.get("item_id") or row.get("id") or "").strip()
+        if not item_id:
+            raise ValueError("managed dataset rows must include item_id or id")
+        items.setdefault(item_id, row)
+
+    if fraction >= 1.0:
+        selected_item_ids = sorted(items)
+    else:
+        strata: dict[str, list[str]] = defaultdict(list)
+        for item_id, row in items.items():
+            strata[_managed_row_stratum(row)].append(item_id)
+        selected_item_ids = []
+        for stratum, item_ids in sorted(strata.items()):
+            ranked = sorted(
+                item_ids,
+                key=lambda item_id: _stable_sample_key(seed, stratum, item_id),
+            )
+            sample_size = max(1, math.ceil(len(ranked) * fraction))
+            selected_item_ids.extend(ranked[:sample_size])
+        selected_item_ids.sort()
+
+    selected = set(selected_item_ids)
+    return (
+        [row for row in rows if str(row.get("item_id") or row.get("id")) in selected],
+        selected_item_ids,
+    )
+
+
+def _managed_row_stratum(row: Mapping[str, Any]) -> str:
+    tags = {str(tag) for tag in row.get("tags", [])}
+    if "single_hop" in tags:
+        return "single_hop"
+    if "multi_hop" in tags:
+        return "multi_hop"
+    return "other"
+
+
+def _stable_sample_key(seed: int, stratum: str, item_id: str) -> str:
+    return hashlib.sha256(f"{seed}:{stratum}:{item_id}".encode()).hexdigest()
+
+
+def _managed_rows_by_scope(
+    rows: list[dict[str, Any]],
+    *,
+    group_by: str,
+) -> dict[str, list[dict[str, Any]]]:
+    if group_by == "none":
+        return {"all": rows}
+
+    grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in rows:
+        system_id = str(row.get("system_id") or "").strip()
+        if not system_id:
+            raise ValueError("managed_group_by=system_id requires system_id on every row")
+        grouped[system_id].append(row)
+    return dict(grouped)
+
+
+def _validate_scope_item_coverage(
+    rows_by_scope: Mapping[str, list[dict[str, Any]]],
+    selected_item_ids: list[str],
+) -> None:
+    expected = set(selected_item_ids)
+    for scope_name, rows in rows_by_scope.items():
+        actual = {str(row.get("item_id") or row.get("id")) for row in rows}
+        if actual != expected:
+            missing = sorted(expected - actual)
+            extra = sorted(actual - expected)
+            raise ValueError(
+                f"managed scope {scope_name!r} does not cover the shared item sample; "
+                f"missing={missing}, extra={extra}"
+            )
+
+
+def _mean_managed_metrics(
+    results: list[FoundryManagedEvaluationResult],
+) -> dict[str, float]:
+    values: dict[str, list[float]] = defaultdict(list)
+    for result in results:
+        for name, value in result.metrics.items():
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                values[name].append(float(value))
+    return {
+        name: sum(metric_values) / len(metric_values)
+        for name, metric_values in sorted(values.items())
+        if metric_values
+    }
 
 
 def _evaluate_with_retries(
@@ -437,8 +698,15 @@ def _dataset_row_count(path: Path) -> int:
         return sum(1 for line in dataset if line.strip())
 
 
-def _managed_evaluator_checkpoint_path(evaluator_name: str) -> Path:
-    return _MANAGED_EVALUATOR_CHECKPOINT_DIR / f"{_evaluation_name_slug(evaluator_name)}.json"
+def _managed_evaluator_checkpoint_path(
+    evaluator_name: str,
+    *,
+    group: str | None = None,
+) -> Path:
+    filename = f"{_evaluation_name_slug(evaluator_name)}.json"
+    if group is None:
+        return _MANAGED_EVALUATOR_CHECKPOINT_DIR / filename
+    return _MANAGED_EVALUATOR_CHECKPOINT_DIR / _evaluation_name_slug(group) / filename
 
 
 def _managed_evaluator_signature(
@@ -537,6 +805,7 @@ def build_foundry_managed_evaluation_plan(
     dataset_path = store.experiment_dir / foundry_config.dataset_path
     manifest_path = store.experiment_dir / foundry_config.manifest_path
     azure_ai_project = _azure_ai_project(foundry_config)
+    sample_plan = _managed_sample_plan(dataset_path, foundry_config)
     return {
         "evaluation_name": foundry_config.evaluation_name or config.experiment.id,
         "dataset_path": str(dataset_path),
@@ -547,6 +816,10 @@ def build_foundry_managed_evaluation_plan(
         "azure_ai_project": azure_ai_project,
         "managed_evaluators": foundry_config.managed_evaluators,
         "managed_execution": foundry_config.managed_execution,
+        "managed_group_by": foundry_config.managed_group_by,
+        "managed_sample_fraction": foundry_config.managed_sample_fraction,
+        "managed_sample_seed": foundry_config.managed_sample_seed,
+        **sample_plan,
         "managed_evaluator_delay_seconds": foundry_config.managed_evaluator_delay_seconds,
         "managed_max_attempts": foundry_config.managed_max_attempts,
         "managed_retry_delay_seconds": foundry_config.managed_retry_delay_seconds,
@@ -557,6 +830,34 @@ def build_foundry_managed_evaluation_plan(
         "evaluator_config": _managed_evaluator_config(foundry_config.managed_evaluators),
         "fail_on_evaluator_errors": foundry_config.fail_on_evaluator_errors,
         "tags": _evaluation_tags(config, foundry_config),
+    }
+
+
+def _managed_sample_plan(
+    dataset_path: Path,
+    config: FoundryEvaluationConfig,
+) -> dict[str, Any]:
+    if not dataset_path.exists():
+        return {
+            "source_row_count": None,
+            "selected_item_count": None,
+            "evaluated_row_count": None,
+            "scope_row_counts": {},
+        }
+    rows = _read_managed_dataset_rows(dataset_path)
+    sampled_rows, selected_item_ids = _sample_managed_rows(
+        rows,
+        fraction=config.managed_sample_fraction,
+        seed=config.managed_sample_seed,
+    )
+    rows_by_scope = _managed_rows_by_scope(sampled_rows, group_by=config.managed_group_by)
+    return {
+        "source_row_count": len(rows),
+        "selected_item_count": len(selected_item_ids),
+        "evaluated_row_count": len(sampled_rows),
+        "scope_row_counts": {
+            scope: len(scope_rows) for scope, scope_rows in sorted(rows_by_scope.items())
+        },
     }
 
 

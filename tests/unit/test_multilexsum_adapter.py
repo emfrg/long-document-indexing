@@ -409,5 +409,56 @@ def test_foundry_multilexsum_legal_rag_qa_config_is_rag_labeled() -> None:
     ]
 
 
+def test_extended_multilexsum_rag_qa_assets_are_balanced_and_bounded() -> None:
+    config = load_experiment_config(
+        Path("configs/experiments/foundry-multilexsum-legal-rag-qa-role-separated-extended.yaml"),
+        project_root=Path.cwd(),
+    )
+    manifest = json.loads(config.dataset.case_manifest.read_text(encoding="utf-8"))
+    questions = [
+        json.loads(line)
+        for line in config.dataset.question_set.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+    assert len(manifest["case_ids"]) == 20
+    assert len(set(manifest["case_ids"])) == 20
+    assert manifest["max_source_documents"] == 8
+    assert config.dataset.revision == manifest["source_dataset_revision"]
+    assert len(questions) == 40
+    assert len({question["id"] for question in questions}) == 40
+    assert {question["corpus_id"] for question in questions} == set(manifest["case_ids"])
+    assert {
+        case_id: sum(question["corpus_id"] == case_id for question in questions)
+        for case_id in manifest["case_ids"]
+    } == {case_id: 2 for case_id in manifest["case_ids"]}
+    assert sum(manifest["legal_domain_counts"].values()) == 20
+    assert sum("single_hop" in question["tags"] for question in questions) == 20
+    assert sum("multi_hop" in question["tags"] for question in questions) == 20
+    assert all(question["ground_truth"]["evidence"] for question in questions)
+    assert all(
+        len(question["ground_truth"]["relevant_document_ids"]) == 1
+        for question in questions
+        if "single_hop" in question["tags"]
+    )
+    assert all(
+        len(question["ground_truth"]["relevant_document_ids"]) >= 2
+        for question in questions
+        if "multi_hop" in question["tags"]
+    )
+    assert all(
+        question["metadata"]["evidence_count"]
+        == len(question["ground_truth"]["evidence"])
+        for question in questions
+    )
+    assert config.run_control.resume is True
+    assert config.run_control.max_model_calls == 5_000
+    assert config.run_control.max_total_tokens == 28_000_000
+    assert config.evaluation.foundry.managed_group_by == "system_id"
+    assert config.evaluation.foundry.managed_sample_fraction == 0.2
+    assert config.evaluation.foundry.managed_sample_seed == 42
+    assert config.evaluation.foundry.fail_on_evaluator_errors is True
+
+
 def _words(prefix: str, count: int) -> str:
     return " ".join(f"{prefix}_{index}" for index in range(count))

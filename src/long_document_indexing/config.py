@@ -265,6 +265,9 @@ class FoundryEvaluationConfig(BaseModel):
     )
     managed_evaluators: list[str] = Field(default_factory=lambda: ["f1", "rouge"])
     managed_execution: Literal["parallel", "sequential"] = "parallel"
+    managed_group_by: Literal["none", "system_id"] = "none"
+    managed_sample_fraction: float = 1.0
+    managed_sample_seed: int = 42
     managed_evaluator_delay_seconds: float = 0.0
     managed_max_attempts: int = 3
     managed_retry_delay_seconds: float = 30.0
@@ -292,6 +295,13 @@ class FoundryEvaluationConfig(BaseModel):
     def _managed_evaluator_delay_must_not_be_negative(cls, value: float) -> float:
         if value < 0:
             raise ValueError("managed_evaluator_delay_seconds must not be negative")
+        return value
+
+    @field_validator("managed_sample_fraction")
+    @classmethod
+    def _managed_sample_fraction_in_range(cls, value: float) -> float:
+        if not 0.0 < value <= 1.0:
+            raise ValueError("managed_sample_fraction must be greater than 0 and at most 1")
         return value
 
     @field_validator("managed_max_attempts")

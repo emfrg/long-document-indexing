@@ -117,6 +117,20 @@ Run managed evaluation over an existing export:
 uv run --python 3.13 --extra foundry --no-editable --reinstall-package long-document-indexing ldi evaluate-foundry-managed --config configs/experiments/enterprise-thin-slice.yaml
 ```
 
+Run the extended legal RAG comparison after the role-separated smoke benchmark succeeds:
+
+```bash
+uv run --python 3.13 --extra foundry --extra multilexsum --no-editable --reinstall-package long-document-indexing ldi run --config configs/experiments/foundry-multilexsum-legal-rag-qa-role-separated-extended.yaml --dry-run-budget
+uv run --python 3.13 --extra foundry --extra multilexsum --no-editable --reinstall-package long-document-indexing ldi run --config configs/experiments/foundry-multilexsum-legal-rag-qa-role-separated-extended.yaml
+uv run --python 3.13 --extra foundry --extra multilexsum --no-editable --reinstall-package long-document-indexing ldi evaluate-foundry-managed --config configs/experiments/foundry-multilexsum-legal-rag-qa-role-separated-extended.yaml
+uv run --python 3.13 --extra foundry --extra multilexsum --no-editable --reinstall-package long-document-indexing ldi publish-foundry-evals --config configs/experiments/foundry-multilexsum-legal-rag-qa-role-separated-extended.yaml --evaluation-name ldi-multilexsum-legal-rag-qa-extended --run-name rag-qa-role-separated-extended-visible
+```
+
+The extended assets contain 20 explicit case IDs and 40 evidence-labelled questions.
+The local and portal-visible comparison covers all 280 system/question rows. Managed
+model judging uses a fixed 20% question sample shared by all seven systems and stores
+per-system evaluator checkpoints and metrics.
+
 Regenerate a report from existing artifacts:
 
 ```bash

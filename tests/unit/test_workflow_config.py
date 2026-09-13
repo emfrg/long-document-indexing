@@ -138,6 +138,9 @@ def test_foundry_evaluation_config_rejects_non_artifact_relative_paths() -> None
     with pytest.raises(ValidationError, match="artifact-relative"):
         FoundryEvaluationConfig.model_validate({"manifest_path": "../foundry.json"})
 
+    with pytest.raises(ValidationError, match="greater than 0 and at most 1"):
+        FoundryEvaluationConfig.model_validate({"managed_sample_fraction": 0})
+
     with pytest.raises(ValidationError, match="artifact-relative"):
         FoundryEvaluationConfig.model_validate({"result_path": "/tmp/result.json"})
 

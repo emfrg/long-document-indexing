@@ -10,6 +10,7 @@ from long_document_indexing.domain.runs import (
 )
 from long_document_indexing.reporting import (
     build_report_bundle,
+    confidence_interval_csv_rows,
     legacy_metric_csv_rows,
     metric_group,
     render_markdown_report,
@@ -113,10 +114,94 @@ def test_report_renderers_keep_legacy_metric_csv_and_add_scorecard_rows() -> Non
         }
     ]
     assert system_summary_csv_rows(bundle.system_rows)[0]["quality_score"] == 1.0
+    assert confidence_interval_csv_rows(bundle.metric_rows)[0] == {
+        "system_id": "alpha",
+        "group": "routing",
+        "metric": "document_recall_at_1",
+        "mean": 1.0,
+        "ci95_low": 1.0,
+        "ci95_high": 1.0,
+        "count": 1.0,
+    }
     markdown = render_markdown_report(bundle)
     assert "## System Scorecard" in markdown
     assert "## Metric Means" in markdown
     assert "No Foundry export manifest was found." in markdown
+
+
+def test_report_computes_deterministic_bootstrap_confidence_intervals() -> None:
+    metrics = [
+        MetricRecord(
+            experiment_id="exp",
+            run_id=f"run-{index}",
+            system_id="alpha",
+            corpus_id=f"corpus-{index}",
+            item_id=f"item-{index}",
+            level="retrieval",
+            name="context_recall_at_4",
+            value=value,
+        )
+        for index, value in enumerate([0.0, 0.0, 1.0, 1.0])
+    ]
+
+    first = build_report_bundle(
+        metrics=metrics,
+        run_records=[],
+        index_usage=[],
+        query_usage=[],
+    ).metric_rows[0]
+    second = build_report_bundle(
+        metrics=metrics,
+        run_records=[],
+        index_usage=[],
+        query_usage=[],
+    ).metric_rows[0]
+
+    assert first.mean == 0.5
+    assert first.ci95_low == 0.0
+    assert first.ci95_high == 1.0
+    assert first == second
+    assert "[0.0000, 1.0000]" in render_markdown_report(
+        build_report_bundle(
+            metrics=metrics,
+            run_records=[],
+            index_usage=[],
+            query_usage=[],
+        )
+    )
+
+
+def test_report_renders_per_system_managed_metrics() -> None:
+    bundle = build_report_bundle(
+        metrics=[],
+        run_records=[],
+        index_usage=[],
+        query_usage=[],
+        foundry_managed_result={
+            "evaluation_name": "managed",
+            "row_count": 4,
+            "metrics": {"groundedness.score": 3.0},
+            "metadata": {
+                "scope_results": {
+                    "flat_vector": {
+                        "metrics": {"groundedness.score": 2.0},
+                    },
+                    "map_reduce": {
+                        "metrics": {"groundedness.score": 4.0},
+                    },
+                }
+            },
+        },
+        foundry_managed_result_path="/tmp/managed-result.json",
+    )
+
+    assert bundle.foundry_export.managed_system_metrics == {
+        "flat_vector": {"groundedness.score": 2.0},
+        "map_reduce": {"groundedness.score": 4.0},
+    }
+    markdown = render_markdown_report(bundle)
+    assert "Per-system managed metrics" in markdown
+    assert "| flat_vector | 2.0000 |" in markdown
 
 
 def test_report_marks_managed_evaluation_unavailable_for_current_export() -> None:

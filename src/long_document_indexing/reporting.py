@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import random
 from collections import defaultdict
 from collections.abc import Iterable, Mapping
 from typing import Any, Literal
@@ -54,6 +56,8 @@ class MetricSummaryRow(BaseModel):
     mean: float
     count: int
     group: MetricGroup
+    ci95_low: float
+    ci95_high: float
 
 
 class UsageSummaryRow(BaseModel):
@@ -121,6 +125,7 @@ class FoundryExportSummary(BaseModel):
     managed_result_path: str | None = None
     managed_row_count: int = 0
     managed_metrics: dict[str, float] = Field(default_factory=dict)
+    managed_system_metrics: dict[str, dict[str, float]] = Field(default_factory=dict)
     managed_evaluation_name: str | None = None
     managed_project_name: str | None = None
     managed_studio_url: str | None = None
@@ -171,12 +176,21 @@ def build_report_bundle(
 
 
 def summarize_metrics(metrics: Iterable[MetricRecord]) -> list[MetricSummaryRow]:
-    grouped: dict[tuple[str, str, str], list[float]] = defaultdict(list)
+    grouped: dict[tuple[str, str, str], list[MetricRecord]] = defaultdict(list)
     for metric in metrics:
-        grouped[(metric.system_id, metric.name, metric.level)].append(metric.value)
+        grouped[(metric.system_id, metric.name, metric.level)].append(metric)
 
     rows = []
-    for (system_id, name, level), values in sorted(grouped.items()):
+    for (system_id, name, level), records in sorted(grouped.items()):
+        values = [record.value for record in records]
+        case_values: dict[str, list[float]] = defaultdict(list)
+        for record in records:
+            case_values[record.corpus_id].append(record.value)
+        case_means = [sum(case) / len(case) for case in case_values.values()]
+        ci95_low, ci95_high = _bootstrap_mean_interval(
+            case_means,
+            seed_key=f"{system_id}:{name}:{level}",
+        )
         rows.append(
             MetricSummaryRow(
                 system_id=system_id,
@@ -185,6 +199,8 @@ def summarize_metrics(metrics: Iterable[MetricRecord]) -> list[MetricSummaryRow]
                 mean=sum(values) / len(values),
                 count=len(values),
                 group=metric_group(name),
+                ci95_low=ci95_low,
+                ci95_high=ci95_high,
             )
         )
     return rows
@@ -443,6 +459,23 @@ def legacy_metric_csv_rows(metric_rows: Iterable[MetricSummaryRow]) -> list[dict
     ]
 
 
+def confidence_interval_csv_rows(
+    metric_rows: Iterable[MetricSummaryRow],
+) -> list[dict[str, str | float]]:
+    return [
+        {
+            "system_id": row.system_id,
+            "group": row.group,
+            "metric": row.metric,
+            "mean": row.mean,
+            "ci95_low": row.ci95_low,
+            "ci95_high": row.ci95_high,
+            "count": float(row.count),
+        }
+        for row in metric_rows
+    ]
+
+
 def system_summary_csv_rows(rows: Iterable[SystemSummaryRow]) -> list[dict[str, Any]]:
     return [
         {
@@ -528,13 +561,14 @@ def render_markdown_report(bundle: ReportBundle) -> str:
         "## Metric Means",
         "",
         _markdown_table(
-            ["system_id", "group", "metric", "mean", "count"],
+            ["system_id", "group", "metric", "mean", "95% CI", "count"],
             [
                 [
                     row.system_id,
                     row.group,
                     row.metric,
                     _format_float(row.mean),
+                    f"[{_format_float(row.ci95_low)}, {_format_float(row.ci95_high)}]",
                     str(row.count),
                 ]
                 for row in bundle.metric_rows
@@ -619,6 +653,32 @@ def _foundry_managed_markdown(summary: FoundryExportSummary) -> str:
             f"  - `{name}`: `{_format_float(value)}`"
             for name, value in sorted(summary.managed_metrics.items())
         )
+    if summary.managed_system_metrics:
+        metric_names = sorted(
+            {
+                metric_name
+                for metrics in summary.managed_system_metrics.values()
+                for metric_name in metrics
+            }
+        )
+        lines.extend(
+            [
+                "- Per-system managed metrics:",
+                _markdown_table(
+                    ["system_id", *metric_names],
+                    [
+                        [
+                            system_id,
+                            *[
+                                _format_float(metrics.get(metric_name))
+                                for metric_name in metric_names
+                            ],
+                        ]
+                        for system_id, metrics in sorted(summary.managed_system_metrics.items())
+                    ],
+                ),
+            ]
+        )
     return "\n".join(lines)
 
 
@@ -631,20 +691,57 @@ def _managed_result_summary(
             "managed_result_path": None,
             "managed_row_count": 0,
             "managed_metrics": {},
+            "managed_system_metrics": {},
             "managed_evaluation_name": None,
             "managed_project_name": None,
             "managed_studio_url": None,
         }
     row_count = result.get("row_count", 0)
     metrics = result.get("metrics", {})
+    metadata = result.get("metadata", {})
     return {
         "managed_result_path": result_path,
         "managed_row_count": int(row_count) if row_count is not None else 0,
         "managed_metrics": _float_metrics(metrics),
+        "managed_system_metrics": _managed_system_metrics(metadata),
         "managed_evaluation_name": _optional_str(result.get("evaluation_name")),
         "managed_project_name": _foundry_project_name(result.get("azure_ai_project")),
         "managed_studio_url": _optional_str(result.get("studio_url")),
     }
+
+
+def _managed_system_metrics(metadata: Any) -> dict[str, dict[str, float]]:
+    if not isinstance(metadata, Mapping):
+        return {}
+    scope_results = metadata.get("scope_results", {})
+    if not isinstance(scope_results, Mapping):
+        return {}
+    return {
+        str(system_id): _float_metrics(scope.get("metrics", {}))
+        for system_id, scope in scope_results.items()
+        if isinstance(scope, Mapping)
+    }
+
+
+def _bootstrap_mean_interval(
+    values: list[float],
+    *,
+    seed_key: str,
+    samples: int = 1000,
+) -> tuple[float, float]:
+    if not values:
+        raise ValueError("cannot compute a confidence interval without values")
+    if len(values) == 1 or len(set(values)) == 1:
+        mean = sum(values) / len(values)
+        return mean, mean
+
+    seed = int.from_bytes(hashlib.sha256(seed_key.encode("utf-8")).digest()[:8], "big")
+    rng = random.Random(seed)
+    count = len(values)
+    means = sorted(
+        sum(values[rng.randrange(count)] for _ in range(count)) / count for _ in range(samples)
+    )
+    return means[int(0.025 * (samples - 1))], means[int(0.975 * (samples - 1))]
 
 
 def _foundry_project_name(value: Any) -> str | None:

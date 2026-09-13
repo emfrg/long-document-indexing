@@ -37,6 +37,7 @@ from long_document_indexing.prompt_safety import PROMPT_SAFETY_POLICY_VERSION
 from long_document_indexing.prompts import PromptLoader
 from long_document_indexing.reporting import (
     build_report_bundle,
+    confidence_interval_csv_rows,
     legacy_metric_csv_rows,
     render_markdown_report,
     system_summary_csv_rows,
@@ -583,6 +584,11 @@ def _report(config: ExperimentConfig) -> None:
         legacy_metric_csv_rows(bundle.metric_rows),
     )
     _write_csv(
+        store.path("report/confidence-intervals.csv"),
+        ["system_id", "group", "metric", "mean", "ci95_low", "ci95_high", "count"],
+        confidence_interval_csv_rows(bundle.metric_rows),
+    )
+    _write_csv(
         store.path("report/system-summary.csv"),
         [
             "system_id",
@@ -672,6 +678,11 @@ def _evaluate_foundry_managed(
         typer.echo(f"Azure AI project: {plan['azure_ai_project']}")
         typer.echo(f"Managed evaluators: {', '.join(plan['managed_evaluators'])}")
         typer.echo(f"Managed execution: {plan['managed_execution']}")
+        typer.echo(f"Managed group by: {plan['managed_group_by']}")
+        typer.echo(f"Managed sample fraction: {plan['managed_sample_fraction']}")
+        typer.echo(f"Source rows: {plan['source_row_count']}")
+        typer.echo(f"Selected items: {plan['selected_item_count']}")
+        typer.echo(f"Rows to evaluate: {plan['evaluated_row_count']}")
         typer.echo(
             "Managed evaluator delay seconds: "
             f"{plan['managed_evaluator_delay_seconds']}"

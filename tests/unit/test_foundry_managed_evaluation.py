@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -50,6 +51,12 @@ def test_foundry_managed_evaluation_plan_uses_export_paths_and_env_project(
     )
     assert plan["managed_evaluators"] == ["f1", "rouge"]
     assert plan["managed_execution"] == "parallel"
+    assert plan["managed_group_by"] == "none"
+    assert plan["managed_sample_fraction"] == 1.0
+    assert plan["source_row_count"] == 1
+    assert plan["selected_item_count"] == 1
+    assert plan["evaluated_row_count"] == 1
+    assert plan["scope_row_counts"] == {"all": 1}
     assert plan["managed_evaluator_delay_seconds"] == 0.0
     assert plan["managed_max_attempts"] == 3
     assert plan["managed_retry_delay_seconds"] == 30.0
@@ -362,6 +369,85 @@ def test_sequential_managed_evaluation_reuses_completed_evaluator_checkpoint(
     assert result.metadata["evaluator_results"][1]["reused"] is False
 
 
+def test_managed_evaluation_samples_same_items_and_reports_each_system(tmp_path) -> None:
+    config = _config(tmp_path)
+    foundry_config = config.evaluation.foundry.model_copy(
+        update={
+            "managed_evaluators": ["groundedness"],
+            "managed_execution": "sequential",
+            "managed_group_by": "system_id",
+            "managed_sample_fraction": 0.5,
+            "managed_sample_seed": 7,
+        }
+    )
+    config = config.model_copy(
+        update={
+            "evaluation": config.evaluation.model_copy(update={"foundry": foundry_config})
+        }
+    )
+    store = ArtifactStore(config.storage.artifacts_dir, config.experiment.id)
+    items = {
+        f"q-{question_type}-{index}": BenchmarkItem(
+            id=f"q-{question_type}-{index}",
+            corpus_id="smoke-corpus",
+            query=f"Question {question_type} {index}?",
+            ground_truth=GroundTruth(expected_answer="Expected."),
+            tags={question_type},
+        )
+        for question_type in ("single_hop", "multi_hop")
+        for index in range(2)
+    }
+    records = [
+        _record_for(item_id=item_id, system_id=system_id)
+        for system_id in ("flat_vector", "map_reduce")
+        for item_id in items
+    ]
+    write_foundry_evaluation_export(
+        store=store,
+        records=records,
+        items_by_id=items,
+        config=foundry_config,
+        experiment_id=config.experiment.id,
+    )
+    calls: list[tuple[str, list[dict[str, Any]]]] = []
+
+    def fake_evaluate(**kwargs: Any) -> dict[str, Any]:
+        rows = [
+            json.loads(line)
+            for line in Path(kwargs["data"]).read_text(encoding="utf-8").splitlines()
+        ]
+        system_id = rows[0]["system_id"]
+        calls.append((system_id, rows))
+        score = 2.0 if system_id == "flat_vector" else 4.0
+        return {
+            "metrics": {"groundedness.score": score},
+            "rows": rows,
+        }
+
+    result = run_foundry_managed_evaluation(
+        config=config,
+        store=store,
+        evaluate_fn=fake_evaluate,
+        sleep_fn=lambda _: None,
+    )
+
+    assert [system_id for system_id, _ in calls] == ["flat_vector", "map_reduce"]
+    assert all(len(rows) == 2 for _, rows in calls)
+    assert {row["item_id"] for row in calls[0][1]} == {row["item_id"] for row in calls[1][1]}
+    assert result.row_count == 4
+    assert result.metrics == {"groundedness.score": 3.0}
+    assert result.metadata["selected_item_count"] == 2
+    assert result.metadata["source_row_count"] == 8
+    assert set(result.metadata["scope_results"]) == {"flat_vector", "map_reduce"}
+    assert result.metadata["scope_results"]["flat_vector"]["metrics"] == {
+        "groundedness.score": 2.0
+    }
+    assert (
+        store.experiment_dir
+        / "evaluations/foundry/managed-evaluators/flat_vector/groundedness.json"
+    ).exists()
+
+
 def test_foundry_managed_evaluator_config_maps_rag_fields() -> None:
     evaluator_config = _managed_evaluator_config(
         [
@@ -618,4 +704,15 @@ def _record() -> RagRunRecord:
         ],
         usage=UsageRecord(input_tokens=10, output_tokens=12, model_calls=1, tool_calls=1),
         status="succeeded",
+    )
+
+
+def _record_for(*, item_id: str, system_id: str) -> RagRunRecord:
+    record = _record()
+    return record.model_copy(
+        update={
+            "run_id": f"run-{system_id}-{item_id}",
+            "system_id": system_id,
+            "item_id": item_id,
+        }
     )

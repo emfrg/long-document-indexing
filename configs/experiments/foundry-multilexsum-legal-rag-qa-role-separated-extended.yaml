@@ -1,0 +1,118 @@
+experiment:
+  id: foundry-multilexsum-legal-rag-qa-role-separated-extended
+  mode: controlled_ablation
+  seed: 42
+  query_repetitions: 1
+
+dataset:
+  adapter: multilexsum
+  split: test
+  revision: 055f5fa5300a5fdefb5b691c4d6c1e58f485b379
+  case_manifest: benchmarks/multilexsum/rag-qa-extended-case-manifest.json
+  question_set: benchmarks/multilexsum/rag-qa-extended.jsonl
+  capabilities:
+    has_expected_answers: true
+    has_relevant_documents: true
+    has_relevant_segments: true
+    has_evidence_spans: true
+    has_reference_summaries: false
+  options:
+    config_name: v20230518
+    trust_remote_code: true
+    segment_tokens: 1200
+    segment_overlap_tokens: 120
+
+models:
+  generator_provider: foundry
+  generator_api: ${FOUNDRY_GENERATOR_API:-responses}
+  generator_base_url: ${FOUNDRY_GENERATOR_BASE_URL}
+  generator_deployment: ${FOUNDRY_GENERATOR_DEPLOYMENT}
+  router_deployment: ${FOUNDRY_ROUTER_MODEL}
+  answer_deployment: ${FOUNDRY_ANSWER_MODEL}
+  judge_deployment: ${FOUNDRY_JUDGE_MODEL}
+  embedding_deployment: ${FOUNDRY_EMBEDDING_MODEL:-text-embedding-3-large}
+  generator_api_key_env: AZURE_INFERENCE_CREDENTIAL
+  generator_auth_mode: api_key
+  generator_max_output_tokens: ${FOUNDRY_GENERATOR_MAX_OUTPUT_TOKENS:-12000}
+  generator_response_format: ${FOUNDRY_GENERATOR_RESPONSE_FORMAT:-structured}
+
+shared_pipeline:
+  segment_tokens: 6000
+  segment_overlap_tokens: 250
+  selected_documents: 2
+  retrieved_segments: 8
+
+workflow:
+  runner: local
+
+answering:
+  mode: generated
+
+systems:
+  - flat_vector
+  - stuffing
+  - map_reduce
+  - refine
+  - hierarchical_map
+  - outline_then_fill
+  - agentic_map
+
+run_control:
+  resume: true
+  max_model_calls: 5000
+  max_total_tokens: 28000000
+
+evaluation:
+  local:
+    - map_schema_validity
+    - map_source_reference_validity
+    - map_compression_ratio
+    - map_completion_rate
+    - document_recall_at_1
+    - document_recall_at_3
+    - mrr
+    - required_document_coverage
+    - segment_recall_at_4
+    - context_precision_at_4
+    - context_recall_at_4
+    - evidence_quote_recall_at_4
+    - citation_precision
+    - citation_recall
+    - citation_support_rate
+    - invalid_citation_rate
+    - answer_reference_token_precision
+    - answer_reference_token_recall
+    - answer_reference_token_f1
+    - query_duration_ms
+    - tool_calls
+  foundry:
+    enabled: true
+    dataset_path: evaluations/foundry/dataset.jsonl
+    manifest_path: evaluations/foundry/manifest.json
+    result_path: evaluations/foundry/managed-result.json
+    evaluation_level: turn
+    evaluators:
+      - groundedness
+      - relevance
+      - retrieval
+      - document_retrieval
+      - response_completeness
+    managed_evaluators:
+      - groundedness
+      - relevance
+      - retrieval
+      - document_retrieval
+      - response_completeness
+    managed_execution: sequential
+    managed_group_by: system_id
+    managed_sample_fraction: 0.2
+    managed_sample_seed: 42
+    managed_evaluator_delay_seconds: 5
+    managed_max_attempts: 4
+    managed_retry_delay_seconds: 30
+    fail_on_evaluator_errors: true
+    tags:
+      benchmark_variant: role-separated-extended-v1
+
+storage:
+  artifacts_dir: artifacts

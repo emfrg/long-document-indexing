@@ -305,6 +305,38 @@ This config uses evidence-labeled questions rather than whole-case summary promp
 its report includes context precision/recall, evidence quote recall, citation precision,
 citation recall, and citation support rate.
 
+Run the fixed 20-case, 40-question comparison after the smoke run succeeds:
+
+```bash
+uv run --python 3.13 --extra foundry --extra multilexsum --no-editable --reinstall-package long-document-indexing ldi run --config configs/experiments/foundry-multilexsum-legal-rag-qa-role-separated-extended.yaml --dry-run-budget
+uv run --python 3.13 --extra foundry --extra multilexsum --no-editable --reinstall-package long-document-indexing ldi run --config configs/experiments/foundry-multilexsum-legal-rag-qa-role-separated-extended.yaml
+```
+
+The extended config compares all seven systems and exports 280 rows. Its managed
+evaluation takes the same deterministic 20% question sample for every system: four
+single-document plus four multi-document questions, or 56 judged rows total. It runs and
+checkpoints each evaluator separately for each system, so rerunning after a connection
+error reuses completed system/evaluator pairs. Each SDK call contains one evaluator and
+eight rows, with evaluator errors configured to fail and retry that small unit.
+
+Preview and run the sampled managed evaluation:
+
+```bash
+uv run --python 3.13 --extra foundry --extra multilexsum --no-editable --reinstall-package long-document-indexing ldi evaluate-foundry-managed --config configs/experiments/foundry-multilexsum-legal-rag-qa-role-separated-extended.yaml --dry-run
+uv run --python 3.13 --extra foundry --extra multilexsum --no-editable --reinstall-package long-document-indexing ldi evaluate-foundry-managed --config configs/experiments/foundry-multilexsum-legal-rag-qa-role-separated-extended.yaml
+```
+
+Publish all 280 deterministic RAG-metric rows as seven comparable Foundry runs:
+
+```bash
+uv run --python 3.13 --extra foundry --extra multilexsum --no-editable --reinstall-package long-document-indexing ldi publish-foundry-evals --config configs/experiments/foundry-multilexsum-legal-rag-qa-role-separated-extended.yaml --evaluation-name ldi-multilexsum-legal-rag-qa-extended --run-name rag-qa-role-separated-extended-visible
+```
+
+The model-role values in `.env` are Azure deployment names and must match existing
+deployments exactly. The expected roles are map builder, router, answerer, judge, and
+embeddings. API-key inference uses `AZURE_INFERENCE_CREDENTIAL`; portal publication also
+uses the Azure CLI identity, so run `az login` first if needed.
+
 ## Enterprise Thin Slice Benchmark
 
 Milestone 11 adds a larger local benchmark fixture under `benchmarks/enterprise/`. It is synthetic and versioned in the repo: 8 documents, 24 source segments, and 16 gold-labeled questions covering policy, incident, launch, budget, training, audit, and escalation notes.
@@ -355,12 +387,13 @@ The runner writes index artifacts, run records, and usage ledgers incrementally.
 ```text
 report/results.md
 report/results.csv
+report/confidence-intervals.csv
 report/system-summary.csv
 report/usage-summary.csv
 report/summary.json
 ```
 
-`results.csv` remains the simple metric mean table for compatibility. `system-summary.csv` adds quality, routing, retrieval, answer, map, latency, token, model-call, and issue columns. `usage-summary.csv` aggregates index/query usage by system and event kind. `summary.json` preserves the complete typed report bundle for scripts or notebooks.
+`results.csv` remains the simple metric mean table for compatibility. `confidence-intervals.csv` adds deterministic case-cluster bootstrap 95% confidence intervals for every local metric mean, so questions from the same case are resampled together. `system-summary.csv` adds quality, routing, retrieval, answer, map, latency, token, model-call, and issue columns. `usage-summary.csv` aggregates index/query usage by system and event kind. `summary.json` preserves the complete typed report bundle for scripts or notebooks.
 
 ## MAF Workflow Runner
 
