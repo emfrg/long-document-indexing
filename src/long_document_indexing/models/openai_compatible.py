@@ -51,6 +51,10 @@ class OpenAICompatibleTextGenerationClient:
         self._client = client
         self._token_provider = token_provider
 
+    @property
+    def model_id(self) -> str:
+        return f"openai-compatible:{self.deployment}:{self.api}:{self.response_format}"
+
     async def generate(self, request: GenerationRequest) -> GenerationResponse:
         return await asyncio.to_thread(self._generate_sync, request)
 

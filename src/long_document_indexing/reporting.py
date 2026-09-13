@@ -121,6 +121,8 @@ class FoundryExportSummary(BaseModel):
     managed_result_path: str | None = None
     managed_row_count: int = 0
     managed_metrics: dict[str, float] = Field(default_factory=dict)
+    managed_evaluation_name: str | None = None
+    managed_project_name: str | None = None
     managed_studio_url: str | None = None
 
 
@@ -591,6 +593,8 @@ def _foundry_export_markdown(summary: FoundryExportSummary) -> str:
     ]
     if summary.managed_result_path:
         lines.extend(["", _foundry_managed_markdown(summary)])
+    else:
+        lines.extend(["", "Managed evaluation: not available for the current export."])
     return "\n".join(lines)
 
 
@@ -600,8 +604,15 @@ def _foundry_managed_markdown(summary: FoundryExportSummary) -> str:
         f"- Result: `{summary.managed_result_path}`",
         f"- Rows: `{summary.managed_row_count}`",
     ]
-    if summary.managed_studio_url:
-        lines.append(f"- Studio URL: `{summary.managed_studio_url}`")
+    if summary.managed_project_name:
+        lines.append(f"- Foundry project: `{summary.managed_project_name}`")
+    if summary.managed_evaluation_name:
+        lines.append(f"- Evaluation: `{summary.managed_evaluation_name}`")
+    if summary.managed_project_name or summary.managed_evaluation_name:
+        lines.append(
+            "- Portal: [Microsoft Foundry](https://ai.azure.com/) "
+            "(open the project, then select `Evaluation` and the evaluation named above)"
+        )
     if summary.managed_metrics:
         lines.append("- Metrics:")
         lines.extend(
@@ -620,6 +631,8 @@ def _managed_result_summary(
             "managed_result_path": None,
             "managed_row_count": 0,
             "managed_metrics": {},
+            "managed_evaluation_name": None,
+            "managed_project_name": None,
             "managed_studio_url": None,
         }
     row_count = result.get("row_count", 0)
@@ -628,8 +641,17 @@ def _managed_result_summary(
         "managed_result_path": result_path,
         "managed_row_count": int(row_count) if row_count is not None else 0,
         "managed_metrics": _float_metrics(metrics),
+        "managed_evaluation_name": _optional_str(result.get("evaluation_name")),
+        "managed_project_name": _foundry_project_name(result.get("azure_ai_project")),
         "managed_studio_url": _optional_str(result.get("studio_url")),
     }
+
+
+def _foundry_project_name(value: Any) -> str | None:
+    project = _optional_str(value)
+    if project is None:
+        return None
+    return project.rstrip("/").rsplit("/", maxsplit=1)[-1]
 
 
 def _float_metrics(metrics: Any) -> dict[str, float]:

@@ -33,6 +33,24 @@ def test_model_factory_creates_foundry_client_without_importing_openai() -> None
     assert client.response_format == "structured"
 
 
+def test_model_factory_selects_explicit_role_deployments_with_generator_fallback() -> None:
+    config = ModelConfig(
+        generator_provider="foundry",
+        generator_base_url="https://example.openai.azure.com/openai/v1/",
+        generator_deployment="map-builder",
+        router_deployment="map-router",
+        answer_deployment="rag-answerer",
+    )
+
+    assert create_text_generation_client(config, role="generator").deployment == "map-builder"
+    assert create_text_generation_client(config, role="router").deployment == "map-router"
+    assert create_text_generation_client(config, role="answer").deployment == "rag-answerer"
+
+    fallback = config.model_copy(update={"router_deployment": "", "answer_deployment": None})
+    assert create_text_generation_client(fallback, role="router").deployment == "map-builder"
+    assert create_text_generation_client(fallback, role="answer").deployment == "map-builder"
+
+
 def test_model_factory_requires_resolved_real_client_values() -> None:
     with pytest.raises(ValueError, match="generator_base_url"):
         create_text_generation_client(

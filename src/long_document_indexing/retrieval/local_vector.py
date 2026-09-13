@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from long_document_indexing.domain.corpus import Corpus
-from long_document_indexing.domain.runs import RetrievedItem
+from long_document_indexing.domain.runs import RetrievedItem, UsageRecord
 from long_document_indexing.text import tokenize
 
 
@@ -107,6 +107,9 @@ class LocalVectorBackend:
     def artifact_path(self, index_id: str) -> Path | None:
         path = self._path(index_id)
         return path if path.exists() else None
+
+    def consume_usage(self) -> UsageRecord:
+        return UsageRecord()
 
     def _path(self, index_id: str) -> Path:
         return self.artifact_dir / f"{index_id}.json"

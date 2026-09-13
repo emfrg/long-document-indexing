@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import json
 from collections.abc import Coroutine
 from pathlib import Path
 from typing import Annotated, Any
@@ -27,7 +28,11 @@ from long_document_indexing.evaluation.foundry import (
 )
 from long_document_indexing.evaluation.local.maps import evaluate_index_artifact
 from long_document_indexing.evaluation.runner import evaluate_run
-from long_document_indexing.models.factory import create_text_generation_client
+from long_document_indexing.models.factory import (
+    create_embedding_client,
+    create_text_generation_client,
+    generation_deployment_for_role,
+)
 from long_document_indexing.prompt_safety import PROMPT_SAFETY_POLICY_VERSION
 from long_document_indexing.prompts import PromptLoader
 from long_document_indexing.reporting import (
@@ -37,7 +42,9 @@ from long_document_indexing.reporting import (
     system_summary_csv_rows,
     usage_summary_csv_rows,
 )
+from long_document_indexing.retrieval.dense_vector import DenseVectorBackend
 from long_document_indexing.retrieval.local_vector import LocalVectorBackend
+from long_document_indexing.routing import ROUTING_POLICY_VERSION
 from long_document_indexing.run_control import (
     BudgetExceeded,
     BudgetLedger,
@@ -45,11 +52,12 @@ from long_document_indexing.run_control import (
 )
 from long_document_indexing.services import Services
 from long_document_indexing.storage.artifacts import ArtifactStore
+from long_document_indexing.storage.maps import read_document_map
 from long_document_indexing.systems.map_base import (
     MAP_SOURCE_REFERENCE_NORMALIZATION_POLICY_VERSION,
 )
 from long_document_indexing.systems.registry import create_system
-from long_document_indexing.telemetry.tracing import stable_query_run_id
+from long_document_indexing.telemetry.tracing import stable_id, stable_query_run_id
 from long_document_indexing.telemetry.usage import UsageEvent, UsageLedger
 from long_document_indexing.workflows.common_indexing import run_indexing_workflow
 from long_document_indexing.workflows.common_query import (
@@ -242,6 +250,7 @@ def _effective_run_control(
 
 def _dry_run_budget(config: ExperimentConfig, run_control: RunControlConfig) -> None:
     loaded = _load_dataset(config)
+    services = _services(config)
     experiment_dir = config.storage.artifacts_dir / config.experiment.id
     existing_index_events = _load_usage_events_from_dir(experiment_dir, "costs/index-usage.jsonl")
     existing_query_events = _load_usage_events_from_dir(experiment_dir, "costs/query-usage.jsonl")
@@ -249,10 +258,29 @@ def _dry_run_budget(config: ExperimentConfig, run_control: RunControlConfig) -> 
     budget = BudgetLedger(run_control, initial_events=initial_events)
     existing_artifacts = _load_index_artifacts_from_dir(experiment_dir)
     reusable_artifacts = [
-        artifact for artifact in existing_artifacts if _is_reusable_index_artifact(artifact)
+        artifact
+        for artifact in existing_artifacts
+        if _is_reusable_index_artifact(
+            artifact,
+            expected_retrieval_backend=services.retrieval_backend.__class__.__name__,
+            expected_index_config_signature=services.index_config_signature(artifact.system_id),
+        )
     ]
     existing_runs = _load_run_records_from_dir(experiment_dir, config)
     successful_runs = [record for record in existing_runs if record.status == "succeeded"]
+    artifacts_by_key = {_index_artifact_key(artifact): artifact for artifact in reusable_artifacts}
+    reusable_runs = [
+        record
+        for record in successful_runs
+        if (
+            artifact := artifacts_by_key.get((record.system_id, record.corpus_id))
+        ) is not None
+        and _is_reusable_query_record(
+            record,
+            artifact,
+            expected_query_config_signature=services.query_config_signature,
+        )
+    ]
     planned_index_units = len(config.systems) * len(loaded.corpora)
     planned_query_units = (
         len(config.systems) * len(loaded.question_set.items) * config.experiment.query_repetitions
@@ -265,7 +293,8 @@ def _dry_run_budget(config: ExperimentConfig, run_control: RunControlConfig) -> 
         f"index={planned_index_units}, query={planned_query_units}, "
         f"existing_indexes={len(existing_artifacts)}, "
         f"reusable_indexes={len(reusable_artifacts)}, "
-        f"existing_successful_queries={len(successful_runs)}"
+        f"existing_successful_queries={len(successful_runs)}, "
+        f"reusable_queries={len(reusable_runs)}"
     )
     for line in describe_budget(run_control, budget.snapshot):
         typer.echo(line)
@@ -280,12 +309,17 @@ def _prepare(config: ExperimentConfig) -> None:
         {
             "experiment": config.experiment.model_dump(mode="json"),
             "dataset": config.dataset.model_dump(mode="json"),
+            "models": config.models.model_dump(mode="json"),
+            "model_roles": _resolved_model_roles(config),
             "systems": config.systems,
             "system_configs": {
                 system_id: config.system_config_for(system_id).model_dump(mode="json")
                 for system_id in config.systems
             },
             "answering": config.answering.model_dump(mode="json"),
+            "shared_pipeline": config.shared_pipeline.model_dump(mode="json"),
+            "workflow": config.workflow.model_dump(mode="json"),
+            "evaluation": config.evaluation.model_dump(mode="json"),
             "run_control": config.run_control.model_dump(mode="json"),
             "corpus_ids": [corpus.id for corpus in loaded.corpora],
             "question_count": len(loaded.question_set.items),
@@ -316,7 +350,11 @@ async def _index(
     artifacts_by_key = {
         _index_artifact_key(artifact): artifact
         for artifact in existing_artifacts
-        if _is_reusable_index_artifact(artifact)
+        if _is_reusable_index_artifact(
+            artifact,
+            expected_retrieval_backend=services.retrieval_backend.__class__.__name__,
+            expected_index_config_signature=services.index_config_signature(artifact.system_id),
+        )
     }
     indexed = 0
     reused = 0
@@ -407,7 +445,11 @@ async def _query(
                         repetition,
                     )
                     existing = records_by_run_id.get(run_id)
-                    if existing is not None and _is_reusable_query_record(existing, artifact):
+                    if existing is not None and _is_reusable_query_record(
+                        existing,
+                        artifact,
+                        expected_query_config_signature=services.query_config_signature,
+                    ):
                         reused += 1
                         continue
 
@@ -421,6 +463,7 @@ async def _query(
                             item_id=item.id,
                             repetition=repetition,
                             index_artifact=artifact,
+                            query_config_signature=services.query_config_signature,
                             reason=exhausted_reason,
                         )
                         skipped += 1
@@ -715,18 +758,197 @@ def _artifact_store(config: ExperimentConfig) -> ArtifactStore:
 
 def _services(config: ExperimentConfig) -> Services:
     store = _artifact_store(config)
-    retrieval_backend = LocalVectorBackend(store.path("indexes", "local_vector"))
+    prompt_loader = PromptLoader(Path("prompts"))
+    backend_names = {
+        config.system_config_for(system_id).retrieval_backend for system_id in config.systems
+    }
+    if len(backend_names) != 1:
+        raise ValueError(
+            "controlled experiments require one shared retrieval backend; "
+            f"configured backends: {sorted(backend_names)}"
+        )
+    backend_name = next(iter(backend_names))
+    embedding_client = None
+    if backend_name == "dense_vector":
+        embedding_client = create_embedding_client(config.models)
+        retrieval_backend = DenseVectorBackend(
+            store.path("indexes", "dense_vector"),
+            embedding_client,
+            batch_size=config.models.embedding_batch_size,
+        )
+    elif backend_name == "local_vector":
+        retrieval_backend = LocalVectorBackend(store.path("indexes", "local_vector"))
+    else:
+        raise ValueError(f"unsupported retrieval backend: {backend_name}")
+    generator_client = create_text_generation_client(config.models, role="generator")
+    router_client = create_text_generation_client(config.models, role="router")
+    answer_client = create_text_generation_client(config.models, role="answer")
+    map_generation_signature = _map_generation_signature(
+        config,
+        prompt_loader=prompt_loader,
+        generator_model_id=generator_client.model_id,
+    )
+    query_config_signature = _query_config_signature(
+        config,
+        prompt_loader=prompt_loader,
+        router_model_id=router_client.model_id,
+        answer_model_id=answer_client.model_id,
+        embedding_model_id=embedding_client.model_id if embedding_client is not None else None,
+        retrieval_backend=retrieval_backend.__class__.__name__,
+    )
+    index_config_signatures = {
+        system_id: _index_config_signature(
+            config,
+            system_id=system_id,
+            map_generation_signature=map_generation_signature,
+            embedding_model_id=(
+                embedding_client.model_id if embedding_client is not None else None
+            ),
+            retrieval_backend=retrieval_backend.__class__.__name__,
+        )
+        for system_id in config.systems
+    }
     return Services(
         artifact_store=store,
         retrieval_backend=retrieval_backend,
         workflow_runner=_workflow_runner(config),
         usage_ledger=UsageLedger(),
-        prompt_loader=PromptLoader(Path("prompts")),
+        prompt_loader=prompt_loader,
         answering_mode=config.answering.mode,
-        generator_client=create_text_generation_client(config.models),
+        generator_client=generator_client,
+        router_client=router_client,
+        answer_client=answer_client,
+        embedding_client=embedding_client,
+        map_generation_signature=map_generation_signature,
+        query_config_signature=query_config_signature,
+        index_config_signatures=index_config_signatures,
         resume_checkpoints=config.run_control.resume and not config.run_control.force,
         progress=typer.echo,
     )
+
+
+def _map_generation_signature(
+    config: ExperimentConfig,
+    *,
+    prompt_loader: PromptLoader,
+    generator_model_id: str,
+) -> str:
+    return _config_signature(
+        "map-generation-config",
+        {
+            "model": _generation_role_config(config, "generator", generator_model_id),
+            "prompt_safety_policy": PROMPT_SAFETY_POLICY_VERSION,
+            "source_reference_normalization_policy": (
+                MAP_SOURCE_REFERENCE_NORMALIZATION_POLICY_VERSION
+            ),
+            "prompts": _prompt_snapshot(prompt_loader, exclude={"shared/answer", "shared/route"}),
+        },
+    )
+
+
+def _query_config_signature(
+    config: ExperimentConfig,
+    *,
+    prompt_loader: PromptLoader,
+    router_model_id: str,
+    answer_model_id: str,
+    embedding_model_id: str | None,
+    retrieval_backend: str,
+) -> str:
+    return _config_signature(
+        "query-config",
+        {
+            "router": _generation_role_config(config, "router", router_model_id),
+            "answer": _generation_role_config(config, "answer", answer_model_id),
+            "answering": config.answering.model_dump(mode="json"),
+            "retrieval": {
+                "backend": retrieval_backend,
+                "embedding_model_id": embedding_model_id,
+                "selected_documents": config.shared_pipeline.selected_documents,
+                "retrieved_segments": config.shared_pipeline.retrieved_segments,
+            },
+            "routing_policy": ROUTING_POLICY_VERSION,
+            "query_policy": QUERY_RUN_POLICY_VERSION,
+            "prompts": {
+                "shared/route": prompt_loader.load("shared", "route"),
+                "shared/answer": prompt_loader.load("shared", "answer"),
+            },
+        },
+    )
+
+
+def _index_config_signature(
+    config: ExperimentConfig,
+    *,
+    system_id: str,
+    map_generation_signature: str,
+    embedding_model_id: str | None,
+    retrieval_backend: str,
+) -> str:
+    normalized_system_id = config.system_config_for(system_id).id
+    return _config_signature(
+        "index-config",
+        {
+            "system": config.system_config_for(system_id).model_dump(mode="json"),
+            "retrieval": {
+                "backend": retrieval_backend,
+                "embedding_model_id": embedding_model_id,
+                "embedding_batch_size": config.models.embedding_batch_size,
+            },
+            "index_pipeline": {
+                "segment_tokens": config.shared_pipeline.segment_tokens,
+                "segment_overlap_tokens": config.shared_pipeline.segment_overlap_tokens,
+            },
+            "map_generation_signature": (
+                None if normalized_system_id == "flat_vector" else map_generation_signature
+            ),
+        },
+    )
+
+
+def _generation_role_config(
+    config: ExperimentConfig,
+    role: str,
+    model_id: str,
+) -> dict[str, Any]:
+    return {
+        "role": role,
+        "model_id": model_id,
+        "provider": config.models.generator_provider,
+        "api": config.models.generator_api,
+        "temperature": config.models.generator_temperature,
+        "max_output_tokens": config.models.generator_max_output_tokens,
+        "response_format": config.models.generator_response_format,
+    }
+
+
+def _prompt_snapshot(prompt_loader: PromptLoader, *, exclude: set[str]) -> dict[str, str]:
+    snapshot = {}
+    for path in sorted(prompt_loader.root.rglob("*.md")):
+        relative = path.relative_to(prompt_loader.root).with_suffix("").as_posix()
+        if relative not in exclude:
+            snapshot[relative] = path.read_text(encoding="utf-8")
+    return snapshot
+
+
+def _config_signature(prefix: str, payload: dict[str, Any]) -> str:
+    return stable_id(prefix, json.dumps(payload, sort_keys=True, separators=(",", ":")))
+
+
+def _resolved_model_roles(config: ExperimentConfig) -> dict[str, str | None]:
+    embedding = config.models.embedding_deployment
+    if embedding is not None and (not embedding.strip() or embedding.strip().startswith("${")):
+        embedding = None
+    judge = config.models.judge_deployment
+    if judge is not None and (not judge.strip() or judge.strip().startswith("${")):
+        judge = None
+    return {
+        "map_builder": generation_deployment_for_role(config.models, "generator"),
+        "router": generation_deployment_for_role(config.models, "router"),
+        "answerer": generation_deployment_for_role(config.models, "answer"),
+        "embedding": embedding,
+        "judge": judge,
+    }
 
 
 def _workflow_runner(config: ExperimentConfig):
@@ -802,8 +1024,24 @@ def _index_artifact_key(artifact: IndexArtifact) -> tuple[str, str]:
     return artifact.system_id, artifact.corpus_id
 
 
-def _is_reusable_index_artifact(artifact: IndexArtifact) -> bool:
+def _is_reusable_index_artifact(
+    artifact: IndexArtifact,
+    *,
+    expected_retrieval_backend: str | None = None,
+    expected_index_config_signature: str | None = None,
+) -> bool:
     if not Path(artifact.artifact_path).exists():
+        return False
+    actual_backend = artifact.build_metadata.get(
+        "retrieval_backend", artifact.build_metadata.get("backend")
+    )
+    if expected_retrieval_backend is not None and actual_backend != expected_retrieval_backend:
+        return False
+    if (
+        expected_index_config_signature is not None
+        and artifact.build_metadata.get("index_config_signature")
+        != expected_index_config_signature
+    ):
         return False
     paths = artifact.build_metadata.get("document_map_paths")
     if paths is None:
@@ -812,7 +1050,11 @@ def _is_reusable_index_artifact(artifact: IndexArtifact) -> bool:
         return False
     if not _has_current_map_artifact_policy(artifact):
         return False
-    return all(Path(str(path)).exists() for path in paths.values())
+    if not all(Path(str(path)).exists() for path in paths.values()):
+        return False
+    if expected_index_config_signature is not None:
+        return _has_current_document_map_content(artifact, paths)
+    return True
 
 
 def _has_current_map_artifact_policy(artifact: IndexArtifact) -> bool:
@@ -823,12 +1065,38 @@ def _has_current_map_artifact_policy(artifact: IndexArtifact) -> bool:
     )
 
 
-def _is_reusable_query_record(record: RagRunRecord, artifact: IndexArtifact) -> bool:
+def _has_current_document_map_content(
+    artifact: IndexArtifact,
+    paths: dict[str, Any],
+) -> bool:
+    signatures = artifact.build_metadata.get("document_map_signatures")
+    if not isinstance(signatures, dict) or set(signatures) != set(paths):
+        return False
+    try:
+        return all(
+            signatures[map_id]
+            == stable_id(
+                "document-map-content",
+                read_document_map(str(path)).model_dump_json(),
+            )
+            for map_id, path in paths.items()
+        )
+    except (OSError, ValueError):
+        return False
+
+
+def _is_reusable_query_record(
+    record: RagRunRecord,
+    artifact: IndexArtifact,
+    *,
+    expected_query_config_signature: str,
+) -> bool:
     return (
         record.status == "succeeded"
         and record.index_artifact_id == artifact.id
         and record.index_artifact_signature == index_artifact_signature(artifact)
         and record.query_policy_version == QUERY_RUN_POLICY_VERSION
+        and record.query_config_signature == expected_query_config_signature
     )
 
 
@@ -893,6 +1161,7 @@ def _skipped_run_record(
     item_id: str,
     repetition: int,
     index_artifact: IndexArtifact,
+    query_config_signature: str,
     reason: str,
 ) -> RagRunRecord:
     return RagRunRecord(
@@ -910,6 +1179,7 @@ def _skipped_run_record(
         index_artifact_id=index_artifact.id,
         index_artifact_signature=index_artifact_signature(index_artifact),
         query_policy_version=QUERY_RUN_POLICY_VERSION,
+        query_config_signature=query_config_signature,
         status="skipped",
         error=reason,
     )
@@ -986,7 +1256,10 @@ def _load_foundry_managed_result(
     result_path = store.experiment_dir / result_relative_path
     if not result_path.exists():
         return None
-    return store.read_json(result_relative_path)
+    result = store.read_json(result_relative_path)
+    if not _foundry_managed_result_matches_current_manifest(config, store, result):
+        return None
+    return result
 
 
 def _foundry_managed_result_path(
@@ -996,7 +1269,28 @@ def _foundry_managed_result_path(
     result_path = store.experiment_dir / config.evaluation.foundry.result_path
     if not result_path.exists():
         return None
+    result = store.read_json(config.evaluation.foundry.result_path)
+    if not _foundry_managed_result_matches_current_manifest(config, store, result):
+        return None
     return str(result_path)
+
+
+def _foundry_managed_result_matches_current_manifest(
+    config: ExperimentConfig,
+    store: ArtifactStore,
+    result: dict,
+) -> bool:
+    manifest = _load_foundry_manifest(config, store)
+    if manifest is None:
+        return False
+    dataset_digest = manifest.get("dataset_sha256")
+    result_metadata = result.get("metadata")
+    if not isinstance(result_metadata, dict):
+        return False
+    return bool(
+        dataset_digest
+        and result_metadata.get("dataset_sha256") == dataset_digest
+    )
 
 
 def _validate_loaded_dataset(loaded: LoadedDataset) -> None:

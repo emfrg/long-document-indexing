@@ -6,11 +6,15 @@ from typing import Any
 from long_document_indexing.domain.maps import DocumentMap, MapEntry
 from long_document_indexing.domain.runs import UsageRecord
 from long_document_indexing.models.base import GenerationRequest, GenerationResponse
-from long_document_indexing.text import approximate_token_count, summarize_text
+from long_document_indexing.text import approximate_token_count, lexical_similarity, summarize_text
 
 
 class FakeTextGenerationClient:
     """Deterministic model replacement for local tests and smoke benchmarks."""
+
+    @property
+    def model_id(self) -> str:
+        return "fake-text-generation/v1"
 
     async def generate(self, request: GenerationRequest) -> GenerationResponse:
         task = request.metadata.get("task")
@@ -22,6 +26,8 @@ class FakeTextGenerationClient:
             payload = _refine_document_map_payload(request.metadata)
         elif task == "answer_query":
             payload = _answer_query_payload(request.metadata)
+        elif task == "route_documents":
+            payload = _route_documents_payload(request.metadata)
         else:
             payload = {"text": "Fake model response."}
 
@@ -132,6 +138,38 @@ def _answer_query_payload(metadata: dict[str, Any]) -> dict[str, Any]:
         + " ".join(citation["quote"] for citation in citations),
         "citations": citations,
     }
+
+
+def _route_documents_payload(metadata: dict[str, Any]) -> dict[str, Any]:
+    query = str(metadata.get("query", ""))
+    max_documents = int(metadata.get("max_documents", 1))
+    document_maps = [
+        DocumentMap.model_validate(payload) for payload in metadata.get("document_maps", [])
+    ]
+    scored = sorted(
+        (
+            (
+                lexical_similarity(query, _document_map_text(document_map)),
+                document_map.document_id,
+            )
+            for document_map in document_maps
+        ),
+        key=lambda item: (-item[0], item[1]),
+    )
+    selected = [document_id for _score, document_id in scored[:max_documents]]
+    return {
+        "selected_document_ids": selected,
+        "rationale": "Fake router selected documents from document-map content.",
+        "unresolved_information_needs": [],
+    }
+
+
+def _document_map_text(document_map: DocumentMap) -> str:
+    parts = [document_map.overview]
+    for root in document_map.entries:
+        for entry in root.walk():
+            parts.extend([entry.kind, entry.label, entry.summary])
+    return "\n".join(parts)
 
 
 def _entry_payload(

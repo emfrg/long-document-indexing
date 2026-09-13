@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -67,6 +68,10 @@ def test_write_foundry_evaluation_export_writes_dataset_and_manifest(tmp_path) -
     assert dataset_rows[0]["query"] == "What did the board approve?"
     assert dataset_rows[0]["context"].startswith("[rank=1 document_id=doc_alpha")
     assert manifest["dataset_path"] == "eval/foundry.jsonl"
+    assert manifest["dataset_sha256"] == hashlib.sha256(
+        export.dataset_path.read_bytes()
+    ).hexdigest()
+    assert export.dataset_sha256 == manifest["dataset_sha256"]
     assert manifest["row_count"] == 1
     assert manifest["evaluation_level"] == "turn"
     assert manifest["foundry_data_mapping"]["query"] == "{{item.query}}"
@@ -75,6 +80,7 @@ def test_write_foundry_evaluation_export_writes_dataset_and_manifest(tmp_path) -
         "retrieved_documents": "{{item.retrieved_documents}}",
     }
     assert manifest["azure_ai_evaluation_column_mapping"]["response"] == "${data.response}"
+    assert dataset_rows[0]["metadata"]["query_policy_version"] == "query-run/v2"
 
 
 def _item() -> BenchmarkItem:
@@ -108,6 +114,9 @@ def _record() -> RagRunRecord:
         system_id="stuffing",
         corpus_id="smoke-corpus",
         item_id="q_alpha",
+        index_artifact_id="index-alpha",
+        index_artifact_signature="index-signature-alpha",
+        query_policy_version="query-run/v2",
         selected_document_ids=["doc_alpha"],
         retrieved_items=[
             RetrievedItem(

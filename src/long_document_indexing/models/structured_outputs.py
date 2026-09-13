@@ -6,6 +6,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from long_document_indexing.domain.maps import DocumentMap, MapEntry, SourceReference
+from long_document_indexing.domain.runs import RoutingDecision
 
 
 class StructuredMapAttribute(BaseModel):
@@ -131,3 +132,23 @@ class StructuredGeneratedAnswer(BaseModel):
     status: Literal["answered", "insufficient_evidence"]
     answer: str
     citations: list[StructuredAnswerCitation]
+
+
+class StructuredRoutingDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    selected_document_ids: list[str] = Field(
+        description="Ranked source document identifiers selected from the supplied maps."
+    )
+    rationale: str = Field(
+        description="Concise evidence-routing rationale grounded only in the supplied maps."
+    )
+    unresolved_information_needs: list[str] = Field(
+        description="Evidence needs that remain unresolved after inspecting the maps."
+    )
+
+    def to_routing_decision(self) -> RoutingDecision:
+        return RoutingDecision.model_validate(self.model_dump(mode="json"))
+
+    def to_generation_content(self) -> str:
+        return self.model_dump_json()

@@ -65,8 +65,18 @@ class ModelConfig(BaseModel):
     generator_max_output_tokens: int | None = None
     generator_timeout_seconds: float = 60.0
     generator_response_format: Literal["structured", "json_object", "text"] = "json_object"
+    router_deployment: str | None = None
+    answer_deployment: str | None = None
     judge_deployment: str | None = None
+    embedding_provider: Literal["fake", "foundry", "openai_compatible"] | None = None
     embedding_deployment: str | None = None
+    embedding_base_url: str | None = None
+    embedding_api_key_env: str | None = None
+    embedding_auth_mode: Literal["api_key", "azure_default_credential"] | None = None
+    embedding_azure_scope: str | None = None
+    embedding_timeout_seconds: float = 60.0
+    embedding_dimensions: int | None = None
+    embedding_batch_size: int = 64
 
     @field_validator("generator_temperature")
     @classmethod
@@ -89,6 +99,20 @@ class ModelConfig(BaseModel):
             raise ValueError("generator_timeout_seconds must be positive")
         return value
 
+    @field_validator("embedding_timeout_seconds")
+    @classmethod
+    def _embedding_timeout_positive(cls, value: float) -> float:
+        if value <= 0:
+            raise ValueError("embedding_timeout_seconds must be positive")
+        return value
+
+    @field_validator("embedding_dimensions", "embedding_batch_size")
+    @classmethod
+    def _embedding_integers_positive(cls, value: int | None) -> int | None:
+        if value is not None and value < 1:
+            raise ValueError("embedding dimensions and batch size must be positive")
+        return value
+
 
 class SharedPipelineConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -105,7 +129,7 @@ class SystemConfig(BaseModel):
     id: str
     type: Literal["native", "external"] = "native"
     indexing_strategy: str | None = None
-    retrieval_backend: str = "local_vector"
+    retrieval_backend: str = "dense_vector"
     overflow_policy: str | None = None
     segment_order: str | None = None
     reduce_fan_in: int = 8
@@ -388,7 +412,7 @@ def _expand_env_string(value: str) -> str:
     def replace(match: re.Match[str]) -> str:
         name = match.group(1)
         default = match.group(2)
-        if name in os.environ:
+        if name in os.environ and (os.environ[name] or default is None):
             return os.environ[name]
         if default is not None:
             return default

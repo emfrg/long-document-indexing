@@ -11,7 +11,7 @@ from long_document_indexing.telemetry.tracing import stable_id, stable_query_run
 from long_document_indexing.workflows.execution import WorkflowExecutionError
 
 WORKFLOW_NAME = "common_query"
-QUERY_RUN_POLICY_VERSION = "query-run/v2"
+QUERY_RUN_POLICY_VERSION = "query-run/v3-model-router-dense-retrieval"
 
 
 async def run_query_workflow(
@@ -86,6 +86,7 @@ async def run_query_workflow(
             index_artifact_id=index_artifact.id,
             index_artifact_signature=index_artifact_signature(index_artifact),
             query_policy_version=QUERY_RUN_POLICY_VERSION,
+            query_config_signature=services.query_config_signature,
             trace_id=exc.record.trace_id,
             workflow_artifact_path=str(workflow_path),
             status="failed",
@@ -102,6 +103,7 @@ async def run_query_workflow(
             "index_artifact_id": index_artifact.id,
             "index_artifact_signature": index_artifact_signature(index_artifact),
             "query_policy_version": QUERY_RUN_POLICY_VERSION,
+            "query_config_signature": services.query_config_signature,
             "trace_id": result.record.trace_id,
             "workflow_artifact_path": str(workflow_path),
         }
@@ -134,6 +136,8 @@ def index_artifact_signature(index_artifact: IndexArtifact) -> str:
         str(index_artifact.build_metadata.get("backend", "")),
         str(index_artifact.build_metadata.get("prompt_safety_policy", "")),
         str(index_artifact.build_metadata.get("source_reference_normalization_policy", "")),
+        str(index_artifact.build_metadata.get("index_config_signature", "")),
+        str(index_artifact.build_metadata.get("document_map_signatures", "")),
     )
 
 

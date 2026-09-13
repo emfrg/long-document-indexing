@@ -21,12 +21,12 @@ from long_document_indexing.prompt_safety import (
     sanitize_prompt_payload,
 )
 from long_document_indexing.prompts import render_prompt
+from long_document_indexing.routing import route_documents_from_maps
 from long_document_indexing.services import Services
 from long_document_indexing.storage.maps import read_document_map, write_document_map
 from long_document_indexing.telemetry.tracing import stable_id, stable_query_run_id
 from long_document_indexing.text import (
     approximate_token_count,
-    lexical_similarity,
 )
 
 MAP_SOURCE_REFERENCE_NORMALIZATION_POLICY_VERSION = "source-reference-normalization/v2"
@@ -54,9 +54,12 @@ class DocumentMapSystemBase(ABC):
         pipeline: SharedPipelineConfig,
     ) -> IndexArtifact:
         retrieval_index_id = await services.retrieval_backend.index(corpus)
+        retrieval_usage = services.retrieval_backend.consume_usage()
         result = await self.build_document_maps(corpus, services, pipeline)
+        total_usage = combine_usage(retrieval_usage, result.usage)
 
         document_map_paths: dict[str, str] = {}
+        document_map_signatures: dict[str, str] = {}
         documents = corpus.document_by_id()
         document_maps = [
             normalize_document_map_source_references(
@@ -83,6 +86,9 @@ class DocumentMapSystemBase(ABC):
                 document_map=document_map,
             )
             document_map_paths[map_id] = str(path)
+            document_map_signatures[map_id] = stable_id(
+                "document-map-content", document_map.model_dump_json()
+            )
 
         intermediate_map_paths: dict[str, str] = {}
         for map_id, document_map in intermediate_maps.items():
@@ -97,8 +103,10 @@ class DocumentMapSystemBase(ABC):
             "retrieval_index_id": retrieval_index_id,
             "retrieval_backend": services.retrieval_backend.__class__.__name__,
             "document_map_paths": document_map_paths,
+            "document_map_signatures": document_map_signatures,
+            "index_config_signature": services.index_config_signature(self.id),
             "document_statuses": result.statuses,
-            "usage": result.usage.model_dump(mode="json"),
+            "usage": total_usage.model_dump(mode="json"),
             "prompt_safety_policy": PROMPT_SAFETY_POLICY_VERSION,
             "source_reference_normalization_policy": (
                 MAP_SOURCE_REFERENCE_NORMALIZATION_POLICY_VERSION
@@ -139,12 +147,13 @@ class DocumentMapSystemBase(ABC):
     ) -> RagRunRecord:
         started = time.perf_counter()
         document_maps = _load_document_maps(index_artifact)
-        selected_document_ids = _route_documents(
-            item.query,
-            document_maps,
-            corpus,
+        routing_result = await route_documents_from_maps(
+            query=item.query,
+            document_maps=document_maps,
+            services=services,
             top_k=pipeline.selected_documents,
         )
+        selected_document_ids = routing_result.decision.selected_document_ids
         retrieval_index_id = _retrieval_index_id(index_artifact)
         retrieved_items = await services.retrieval_backend.search(
             retrieval_index_id,
@@ -152,6 +161,7 @@ class DocumentMapSystemBase(ABC):
             document_ids=selected_document_ids,
             top_k=pipeline.retrieved_segments,
         )
+        retrieval_usage = services.retrieval_backend.consume_usage()
         answer_result = await answer_from_retrieved_evidence(
             item=item,
             retrieved_items=retrieved_items,
@@ -170,8 +180,9 @@ class DocumentMapSystemBase(ABC):
             retrieved_items=retrieved_items,
             answer=answer_result.answer,
             citations=answer_result.citations,
+            routing_decision=routing_result.decision,
             usage=query_usage(
-                answer_result.usage,
+                combine_usage(routing_result.usage, retrieval_usage, answer_result.usage),
                 tool_calls=2,
                 duration_ms=duration_ms,
             ),
@@ -524,37 +535,6 @@ def _load_document_maps(index_artifact: IndexArtifact) -> list[DocumentMap]:
     if not isinstance(paths, dict):
         raise ValueError("index artifact build_metadata.document_map_paths must be a mapping")
     return [read_document_map(path) for path in paths.values()]
-
-
-def _route_documents(
-    query: str,
-    document_maps: list[DocumentMap],
-    corpus: Corpus,
-    *,
-    top_k: int,
-) -> list[str]:
-    if top_k < 1:
-        return []
-    if not document_maps:
-        return [document.id for document in corpus.documents[:top_k]]
-
-    scored = [
-        (
-            lexical_similarity(query, _map_text(document_map)),
-            document_map.document_id,
-        )
-        for document_map in document_maps
-    ]
-    scored.sort(key=lambda item: (-item[0], item[1]))
-    return [document_id for _, document_id in scored[:top_k]]
-
-
-def _map_text(document_map: DocumentMap) -> str:
-    parts = [document_map.overview]
-    for root in document_map.entries:
-        for entry in root.walk():
-            parts.extend([entry.kind, entry.label, entry.summary])
-    return "\n".join(parts)
 
 
 def _retrieval_index_id(index_artifact: IndexArtifact) -> str:

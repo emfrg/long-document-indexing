@@ -88,7 +88,24 @@ def test_foundry_managed_evaluation_calls_injected_evaluate_and_writes_result(tm
     assert result.metrics == {"f1": 1.0, "rouge": 0.75}
     assert result.row_count == 1
     assert result.studio_url == "https://ai.azure.com/evaluations/run-alpha"
+    manifest = store.read_json(config.evaluation.foundry.manifest_path)
+    assert result.metadata["dataset_sha256"] == manifest["dataset_sha256"]
     assert (store.experiment_dir / config.evaluation.foundry.result_path).exists()
+
+
+def test_foundry_managed_evaluation_rejects_dataset_manifest_mismatch(tmp_path) -> None:
+    config = _config(tmp_path)
+    store = ArtifactStore(config.storage.artifacts_dir, config.experiment.id)
+    _write_export(store, config.evaluation.foundry)
+    dataset_path = store.experiment_dir / config.evaluation.foundry.dataset_path
+    dataset_path.write_text("{}\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="does not match its manifest"):
+        run_foundry_managed_evaluation(
+            config=config,
+            store=store,
+            evaluate_fn=lambda **_: {},
+        )
 
 
 def test_foundry_managed_evaluation_calls_injected_evaluate_with_rag_mappings(
@@ -259,6 +276,7 @@ def test_foundry_managed_evaluators_mark_gpt5_judge_as_reasoning_model(
                 "generator_provider": "foundry",
                 "generator_base_url": "https://example.services.ai.azure.com/openai/v1/",
                 "generator_deployment": "gpt-5-mini-doc-map-generator",
+                "judge_deployment": "gpt-5-rag-judge",
             },
             "systems": ["flat_vector"],
         }
@@ -299,6 +317,7 @@ def test_foundry_managed_evaluators_allow_reasoning_model_override(
                 "generator_provider": "foundry",
                 "generator_base_url": "https://example.services.ai.azure.com/openai/v1/",
                 "generator_deployment": "gpt-5-mini-doc-map-generator",
+                "judge_deployment": "gpt-5-rag-judge",
             },
             "systems": ["flat_vector"],
         }
@@ -307,6 +326,29 @@ def test_foundry_managed_evaluators_allow_reasoning_model_override(
     _managed_evaluators(["groundedness"], config=config)
 
     assert calls["GroundednessEvaluator"]["kwargs"]["is_reasoning_model"] is False
+
+
+def test_foundry_managed_evaluators_require_explicit_judge_deployment(
+    monkeypatch,
+) -> None:
+    calls: dict[str, dict[str, Any]] = {}
+    monkeypatch.setitem(sys.modules, "azure.ai.evaluation", _fake_azure_evaluation_module(calls))
+    monkeypatch.setenv("AZURE_INFERENCE_CREDENTIAL", "test-key")
+    config = ExperimentConfig.model_validate(
+        {
+            "experiment": {"id": "exp"},
+            "dataset": {"adapter": "jsonl"},
+            "models": {
+                "generator_provider": "foundry",
+                "generator_base_url": "https://example.services.ai.azure.com/openai/v1/",
+                "generator_deployment": "gpt-5-mini-doc-map-generator",
+            },
+            "systems": ["flat_vector"],
+        }
+    )
+
+    with pytest.raises(RuntimeError, match="models.judge_deployment"):
+        _managed_evaluators(["groundedness"], config=config)
 
 
 def test_reasoning_model_deployment_detection() -> None:

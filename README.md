@@ -11,7 +11,7 @@ The repository is intentionally benchmark-first:
 5. Evaluate deterministic retrieval, evidence, and citation metrics locally.
 6. Export Foundry-ready evaluation datasets behind an adapter.
 
-The first milestone is local-only. It includes the canonical domain model, a JSONL smoke dataset, a simple lexical retrieval backend, a flat-vector-style baseline, and local metrics.
+Local smoke runs use deterministic fake models. Real experiments use model embeddings for dense retrieval and an LLM router that reasons over complete document maps before raw-evidence retrieval.
 
 Python 3.12 or 3.13 is required. Python 3.14 release candidates are intentionally excluded until the dependency stack supports them cleanly.
 
@@ -60,9 +60,9 @@ The CLI command uses `--no-editable` because some macOS Python 3.13 environments
 
 ## Current Shape
 
-The default path is still local and deterministic: `generator_provider: fake` runs without Azure credentials and exercises the same orchestration, metric, reporting, and export code used by real-model experiments.
+The default path is still local and deterministic: `generator_provider: fake` runs without Azure credentials and exercises the same orchestration, metric, reporting, and export code used by real-model experiments. The legacy lexical backend is available only when a system explicitly selects `retrieval_backend: local_vector`.
 
-The real-model path is optional. Foundry/Azure OpenAI inference is isolated behind `TextGenerationClient`, and GPT-5-family structured generation uses the Responses API with Pydantic output contracts. API-key inference does not require Azure CLI login.
+The real-model path is optional. Foundry/Azure OpenAI generation and embeddings are isolated behind `TextGenerationClient` and `EmbeddingClient`. Mapped systems send complete normalized maps to a shared structured-output LLM router, then use the same dense backend to retrieve raw source segments from the selected documents. API-key inference does not require Azure CLI login.
 
 The Foundry evaluation path is split deliberately. Local export writes JSONL datasets under ignored `artifacts/`; managed evaluation uses the Azure AI Evaluation SDK when requested. Logging managed results to a Foundry project requires a project endpoint and may require `az login`. `azd` is only needed for provisioning or hosted-agent workflows.
 
@@ -78,7 +78,7 @@ The repo now has seven comparable systems:
 
 | System | Config id | Role |
 | --- | --- | --- |
-| Flat vector baseline | `flat_vector` | Raw segment retrieval without document maps. |
+| Flat vector baseline | `flat_vector` | Dense semantic retrieval over raw source segments without document maps. |
 | Stuffing map | `stuffing` | One map from the full document when it fits the context budget. |
 | Map-reduce map | `map_reduce` | Segment maps reduced into one document map. |
 | Refine map | `refine` | Sequential map revision over ordered segments. |

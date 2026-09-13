@@ -55,6 +55,17 @@ class RunContext(BaseModel):
     repetition: int = 0
 
 
+class RoutingDecision(BaseModel):
+    """Structured decision produced by the shared document-map router."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    selected_document_ids: list[str]
+    rationale: str
+    unresolved_information_needs: list[str] = Field(default_factory=list)
+    model_id: str | None = None
+
+
 class RagRunRecord(BaseModel):
     """Standardized system output consumed by all evaluators and reports."""
 
@@ -71,11 +82,13 @@ class RagRunRecord(BaseModel):
     retrieved_items: list[RetrievedItem]
     answer: str
     citations: list[Citation]
+    routing_decision: RoutingDecision | None = None
 
     usage: UsageRecord = Field(default_factory=UsageRecord)
     index_artifact_id: str | None = None
     index_artifact_signature: str | None = None
     query_policy_version: str | None = None
+    query_config_signature: str | None = None
     trace_id: str | None = None
     workflow_artifact_path: str | None = None
     status: Literal["succeeded", "failed", "skipped"]

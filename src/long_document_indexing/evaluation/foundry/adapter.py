@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -12,7 +13,7 @@ from long_document_indexing.domain.benchmark import BenchmarkItem, EvidenceSpan,
 from long_document_indexing.domain.runs import Citation, RagRunRecord, RetrievedItem
 from long_document_indexing.storage.artifacts import ArtifactStore
 
-FOUNDRY_EVALUATION_SCHEMA_VERSION = "foundry-evaluation-dataset/v1"
+FOUNDRY_EVALUATION_SCHEMA_VERSION = "foundry-evaluation-dataset/v2"
 
 
 @dataclass(frozen=True)
@@ -20,6 +21,7 @@ class FoundryEvaluationExport:
     dataset_path: Path
     manifest_path: Path
     row_count: int
+    dataset_sha256: str
 
 
 class FoundryEvaluationMessage(BaseModel):
@@ -122,6 +124,7 @@ class FoundryEvaluationManifest(BaseModel):
     schema_version: str = FOUNDRY_EVALUATION_SCHEMA_VERSION
     experiment_id: str
     dataset_path: str
+    dataset_sha256: str
     row_count: int
     systems: list[str]
     evaluation_level: Literal["turn"]
@@ -153,6 +156,7 @@ def build_foundry_evaluation_manifest(
     *,
     experiment_id: str,
     dataset_path: Path,
+    dataset_sha256: str,
     records: Iterable[RagRunRecord],
     rows: Iterable[FoundryEvaluationRow],
     config: FoundryEvaluationConfig,
@@ -162,6 +166,7 @@ def build_foundry_evaluation_manifest(
     return FoundryEvaluationManifest(
         experiment_id=experiment_id,
         dataset_path=str(dataset_path),
+        dataset_sha256=dataset_sha256,
         row_count=len(row_list),
         systems=sorted({row.system_id for row in row_list}),
         evaluation_level=config.evaluation_level,
@@ -194,9 +199,11 @@ def write_foundry_evaluation_export(
         raise ValueError("cannot export a Foundry evaluation dataset without run records")
 
     dataset_path = store.write_jsonl(config.dataset_path, rows)
+    digest = dataset_sha256(dataset_path)
     manifest = build_foundry_evaluation_manifest(
         experiment_id=experiment_id,
         dataset_path=config.dataset_path,
+        dataset_sha256=digest,
         records=record_list,
         rows=rows,
         config=config,
@@ -206,7 +213,12 @@ def write_foundry_evaluation_export(
         dataset_path=dataset_path,
         manifest_path=manifest_path,
         row_count=len(rows),
+        dataset_sha256=digest,
     )
+
+
+def dataset_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def foundry_data_mapping() -> dict[str, str]:
@@ -337,7 +349,10 @@ def _build_row(record: RagRunRecord, item: BenchmarkItem) -> FoundryEvaluationRo
         status=record.status,
         metadata={
             "error": record.error,
+            "index_artifact_id": record.index_artifact_id,
+            "index_artifact_signature": record.index_artifact_signature,
             "item_metadata": item.metadata,
+            "query_policy_version": record.query_policy_version,
             "trace_id": record.trace_id,
             "usage": record.usage.model_dump(mode="json"),
             "workflow_artifact_path": record.workflow_artifact_path,

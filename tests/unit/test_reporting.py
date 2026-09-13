@@ -52,9 +52,14 @@ def test_report_bundle_summarizes_quality_usage_and_foundry_export() -> None:
         },
         foundry_manifest_path="/tmp/manifest.json",
         foundry_managed_result={
+            "evaluation_name": "benchmark-evaluation",
+            "azure_ai_project": (
+                "/subscriptions/sub/resourceGroups/rg/providers/"
+                "Microsoft.CognitiveServices/accounts/account/projects/project-name"
+            ),
             "row_count": 3,
             "metrics": {"f1.f1_score": 0.8, "rouge.rouge": 0.7},
-            "studio_url": "https://ai.azure.com/project/evaluations/run",
+            "studio_url": "https://ai.azure.com/resource/build/evaluation/legacy-run",
         },
         foundry_managed_result_path="/tmp/managed-result.json",
     )
@@ -85,6 +90,10 @@ def test_report_bundle_summarizes_quality_usage_and_foundry_export() -> None:
     markdown = render_markdown_report(bundle)
     assert "Managed evaluation:" in markdown
     assert "`f1.f1_score`: `0.8000`" in markdown
+    assert "Foundry project: `project-name`" in markdown
+    assert "Evaluation: `benchmark-evaluation`" in markdown
+    assert "[Microsoft Foundry](https://ai.azure.com/)" in markdown
+    assert "/resource/build/evaluation/" not in markdown
 
 
 def test_report_renderers_keep_legacy_metric_csv_and_add_scorecard_rows() -> None:
@@ -108,6 +117,26 @@ def test_report_renderers_keep_legacy_metric_csv_and_add_scorecard_rows() -> Non
     assert "## System Scorecard" in markdown
     assert "## Metric Means" in markdown
     assert "No Foundry export manifest was found." in markdown
+
+
+def test_report_marks_managed_evaluation_unavailable_for_current_export() -> None:
+    bundle = build_report_bundle(
+        metrics=[],
+        run_records=[],
+        index_usage=[],
+        query_usage=[],
+        foundry_manifest={
+            "dataset_path": "evaluations/foundry/dataset.jsonl",
+            "row_count": 0,
+            "systems": [],
+            "evaluators": ["groundedness"],
+        },
+    )
+
+    assert (
+        "Managed evaluation: not available for the current export."
+        in render_markdown_report(bundle)
+    )
 
 
 def test_report_scores_answer_reference_metrics_without_requiring_perfection() -> None:

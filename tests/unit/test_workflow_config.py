@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from long_document_indexing.cli import _workflow_runner
+from long_document_indexing.cli import _services, _workflow_runner
 from long_document_indexing.config import (
     AnsweringConfig,
     ExperimentConfig,
@@ -15,6 +15,7 @@ from long_document_indexing.config import (
     WorkflowConfig,
     load_experiment_config,
 )
+from long_document_indexing.retrieval.dense_vector import DenseVectorBackend
 from long_document_indexing.workflows.execution import LocalWorkflowRunner, MafWorkflowRunner
 
 
@@ -62,10 +63,51 @@ def test_load_experiment_config_loads_system_configs() -> None:
     )
 
     assert config.system_config_for("flat-vector").indexing_strategy == "raw_segments"
+    assert config.system_config_for("flat-vector").retrieval_backend == "dense_vector"
     assert config.system_config_for("map-reduce").reduce_fan_in == 8
     assert config.system_config_for("hierarchical-map").hierarchy_branching_factor == 2
     assert config.system_config_for("outline-then-fill").outline_max_nodes == 8
     assert config.system_config_for("agentic-map").agent_max_steps == 8
+
+
+def test_load_experiment_config_uses_embedding_default_for_blank_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FOUNDRY_EMBEDDING_MODEL", "")
+
+    config = load_experiment_config(
+        Path("configs/experiments/foundry-multilexsum-legal-rag-qa-smoke.yaml"),
+        project_root=Path.cwd(),
+    )
+
+    assert config.models.embedding_deployment == "text-embedding-3-large"
+
+
+def test_cli_uses_shared_dense_backend_for_configured_systems(tmp_path) -> None:
+    config = ExperimentConfig.model_validate(
+        {
+            "experiment": {"id": "dense-exp"},
+            "dataset": {"adapter": "jsonl"},
+            "models": {"generator_provider": "fake"},
+            "systems": ["flat_vector", "stuffing"],
+            "system_configs": {
+                "flat_vector": {
+                    "id": "flat_vector",
+                    "retrieval_backend": "dense_vector",
+                },
+                "stuffing": {
+                    "id": "stuffing",
+                    "retrieval_backend": "dense_vector",
+                },
+            },
+            "storage": {"artifacts_dir": str(tmp_path)},
+        }
+    )
+
+    services = _services(config)
+
+    assert isinstance(services.retrieval_backend, DenseVectorBackend)
+    assert services.embedding_client is not None
 
 
 def test_system_config_rejects_invalid_advanced_knobs() -> None:

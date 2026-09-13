@@ -2,6 +2,6 @@ system:
   id: outline_then_fill
   type: native
   indexing_strategy: outline_then_fill
-  retrieval_backend: local_vector
+  retrieval_backend: dense_vector
   outline_depth: 2
   outline_max_nodes: 8

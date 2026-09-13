@@ -154,7 +154,9 @@ async def test_mapped_query_can_generate_model_backed_answer(tmp_path) -> None:
     )
 
     assert record.answer.startswith("Fake generated answer")
-    assert record.usage.model_calls == 1
+    assert record.usage.model_calls == 2
+    assert record.routing_decision is not None
+    assert record.routing_decision.selected_document_ids == ["doc_alpha"]
     assert {citation.segment_id for citation in record.citations} <= {
         retrieved.segment_id for retrieved in record.retrieved_items
     }

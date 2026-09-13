@@ -11,6 +11,7 @@ from urllib.parse import urlsplit, urlunsplit
 from pydantic import BaseModel, ConfigDict, Field
 
 from long_document_indexing.config import ExperimentConfig, FoundryEvaluationConfig, ModelConfig
+from long_document_indexing.evaluation.foundry.adapter import dataset_sha256
 from long_document_indexing.storage.artifacts import ArtifactStore
 
 _TEXT_SCORE_EVALUATORS = {"f1", "rouge", "bleu", "gleu", "meteor"}
@@ -72,6 +73,15 @@ def run_foundry_managed_evaluation(
             "Run `ldi evaluate` or `ldi export-foundry-eval` first."
         )
 
+    manifest = store.read_json(foundry_config.manifest_path)
+    actual_dataset_sha256 = dataset_sha256(dataset_path)
+    expected_dataset_sha256 = manifest.get("dataset_sha256")
+    if expected_dataset_sha256 != actual_dataset_sha256:
+        raise ValueError(
+            "Foundry evaluation dataset does not match its manifest. "
+            "Run `ldi evaluate` or `ldi export-foundry-eval` again."
+        )
+
     azure_ai_project = _azure_ai_project(foundry_config)
     evaluation_name = foundry_config.evaluation_name or config.experiment.id
     evaluate = evaluate_fn or _load_evaluate()
@@ -95,6 +105,15 @@ def run_foundry_managed_evaluation(
             evaluation_name=evaluation_name,
             evaluate=evaluate,
             use_placeholder_evaluators=evaluate_fn is not None,
+        )
+    normalized.metadata["dataset_sha256"] = actual_dataset_sha256
+    normalized.metadata["manifest_schema_version"] = manifest.get("schema_version")
+    if any(
+        name.lower() in _MODEL_JUDGE_EVALUATORS
+        for name in foundry_config.managed_evaluators
+    ):
+        normalized.metadata["judge_deployment"] = _resolved_string(
+            config.models.judge_deployment
         )
     store.write_json(foundry_config.result_path, normalized)
     return normalized
@@ -422,7 +441,7 @@ def _judge_model_config_plan(
     if not any(name.lower() in _MODEL_JUDGE_EVALUATORS for name in evaluator_names):
         return None
 
-    deployment = _resolved_string(config.judge_deployment or config.generator_deployment)
+    deployment = _resolved_string(config.judge_deployment)
     endpoint = _resolved_azure_openai_endpoint(config.generator_base_url)
     api_key_configured = (
         bool(os.environ.get(config.generator_api_key_env))
@@ -455,9 +474,7 @@ def _required_judge_model_config(config: ModelConfig) -> dict[str, Any]:
 
     model_config: dict[str, Any] = {
         "type": "azure_openai",
-        "azure_deployment": _resolved_string(
-            config.judge_deployment or config.generator_deployment
-        ),
+        "azure_deployment": _resolved_string(config.judge_deployment),
         "azure_endpoint": _resolved_azure_openai_endpoint(config.generator_base_url),
     }
     api_version = _evaluation_api_version()
@@ -490,8 +507,8 @@ def _missing_judge_model_values(config: ModelConfig) -> list[str]:
     missing = []
     if _resolved_azure_openai_endpoint(config.generator_base_url) is None:
         missing.append("models.generator_base_url")
-    if _resolved_string(config.judge_deployment or config.generator_deployment) is None:
-        missing.append("models.judge_deployment or models.generator_deployment")
+    if _resolved_string(config.judge_deployment) is None:
+        missing.append("models.judge_deployment")
     if config.generator_auth_mode == "api_key" and not os.environ.get(config.generator_api_key_env):
         missing.append(config.generator_api_key_env)
     return missing
@@ -544,7 +561,7 @@ def _is_reasoning_model_judge(config: ModelConfig) -> bool:
             "FOUNDRY_EVALUATION_REASONING_MODEL must be true or false when set."
         )
 
-    deployment = _resolved_string(config.judge_deployment or config.generator_deployment)
+    deployment = _resolved_string(config.judge_deployment)
     if deployment is None:
         return False
     return _is_reasoning_model_deployment(deployment)

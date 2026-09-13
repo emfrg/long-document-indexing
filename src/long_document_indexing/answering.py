@@ -90,7 +90,8 @@ async def _generated_answer(
     retrieved_items: list[RetrievedItem],
     services: Services,
 ) -> AnswerResult:
-    if services.generator_client is None:
+    client = services.answer_client or services.generator_client
+    if client is None:
         raise RuntimeError("generated answering requires a generator client")
     if not retrieved_items:
         return AnswerResult(answer="No local evidence was retrieved.", citations=[])
@@ -105,7 +106,7 @@ async def _generated_answer(
             },
         )
     )
-    response = await services.generator_client.generate(
+    response = await client.generate(
         GenerationRequest(
             prompt=prompt,
             prompt_name="shared/answer",

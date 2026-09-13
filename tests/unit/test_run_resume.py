@@ -52,6 +52,7 @@ def test_resume_reuses_succeeded_index_and_query_artifacts(tmp_path) -> None:
     assert {record.query_policy_version for record in records} == {QUERY_RUN_POLICY_VERSION}
     assert all(record.index_artifact_id for record in records)
     assert all(record.index_artifact_signature for record in records)
+    assert all(record.query_config_signature for record in records)
 
 
 def test_stale_map_artifacts_are_not_reusable(tmp_path) -> None:
@@ -109,13 +110,22 @@ def test_query_records_are_reusable_only_for_matching_index_signature(tmp_path) 
         index_artifact_id=artifact.id,
         index_artifact_signature=index_artifact_signature(artifact),
         query_policy_version=QUERY_RUN_POLICY_VERSION,
+        query_config_signature="query-v1",
     )
 
-    assert _is_reusable_query_record(record, artifact) is True
+    assert (
+        _is_reusable_query_record(
+            record,
+            artifact,
+            expected_query_config_signature="query-v1",
+        )
+        is True
+    )
     assert (
         _is_reusable_query_record(
             record.model_copy(update={"query_policy_version": "old-query-policy"}),
             artifact,
+            expected_query_config_signature="query-v1",
         )
         is False
     )
@@ -123,6 +133,15 @@ def test_query_records_are_reusable_only_for_matching_index_signature(tmp_path) 
         _is_reusable_query_record(
             record.model_copy(update={"index_artifact_signature": "old-signature"}),
             artifact,
+            expected_query_config_signature="query-v1",
+        )
+        is False
+    )
+    assert (
+        _is_reusable_query_record(
+            record,
+            artifact,
+            expected_query_config_signature="query-v2",
         )
         is False
     )

@@ -39,7 +39,7 @@ The implemented comparison set is one non-map baseline plus six document-map str
 
 | System | What It Does |
 | --- | --- |
-| `flat_vector` | Indexes raw source segments and retrieves directly from them. |
+| `flat_vector` | Embeds raw source segments and retrieves directly from the dense index. |
 | `stuffing` | Builds one document map from the whole document when it fits the configured context budget. |
 | `map_reduce` | Builds segment-level maps, then merges them through a bounded fan-in reduction. |
 | `refine` | Builds a document map by revising it sequentially over ordered segments. |
@@ -47,7 +47,7 @@ The implemented comparison set is one non-map baseline plus six document-map str
 | `outline_then_fill` | Generates an outline plan, fills each outline node from assigned source segments, then assembles the final map. |
 | `agentic_map` | Runs a bounded inspect-and-revise loop that records selected segments, coverage, and intermediate map states. |
 
-All six map-producing systems inherit the same final query path: route over document maps, retrieve source segments from the local vector backend, then answer from retrieved evidence.
+All six map-producing systems inherit the same controlled query path: an LLM router reads the complete normalized maps and selects source documents, the shared dense backend retrieves raw segments only from those documents, and the answer model responds from the retrieved evidence. The flat baseline searches the same dense raw-segment index without map routing.
 
 ## Directory Guide
 
@@ -59,13 +59,13 @@ All six map-producing systems inherit the same final query path: route over docu
 
 `src/long_document_indexing/workflows/` defines the execution boundary. The local runner and MAF runner both expose the same workflow result shape, so benchmark behavior does not depend on the workflow backend.
 
-`src/long_document_indexing/models/` defines model-generation boundaries. The fake client keeps tests deterministic; the OpenAI-compatible client supports Foundry/Azure OpenAI endpoints and GPT-5-family Responses structured outputs.
+`src/long_document_indexing/models/` defines generation and embedding boundaries. Fake clients keep tests deterministic; OpenAI-compatible clients support Foundry/Azure OpenAI structured generation and embeddings.
 
 `src/long_document_indexing/evaluation/` contains local metrics and Foundry adapters. Local metrics are deterministic. Foundry export and managed evaluation are opt-in.
 
 `src/long_document_indexing/reporting.py` builds the report bundle used by `ldi report` and the end of `ldi run`.
 
-`configs/experiments/` contains complete runnable benchmark definitions. `configs/systems/` stores system-level configuration placeholders for future richer system configs.
+`configs/experiments/` contains complete runnable benchmark definitions. `configs/systems/` stores the indexing and retrieval configuration for each system.
 
 `benchmarks/` contains versioned benchmark fixtures. `benchmarks/smoke/` is the smallest deterministic fixture. `benchmarks/enterprise/` is the larger synthetic thin slice.
 
@@ -132,8 +132,11 @@ Real inference needs `.env` or environment variables for:
 ```text
 FOUNDRY_GENERATOR_BASE_URL
 FOUNDRY_GENERATOR_DEPLOYMENT
+FOUNDRY_EMBEDDING_MODEL
 AZURE_INFERENCE_CREDENTIAL
 ```
+
+`FOUNDRY_EMBEDDING_MODEL` must name an embedding deployment on the same compatible endpoint. The checked-in Foundry configs default to `text-embedding-3-large` when the variable is unset or blank.
 
 The base URL should end at `/openai/v1/`. If it includes `/responses` or `/chat/completions`, the client normalizes it.
 
@@ -147,7 +150,7 @@ Add a dataset by implementing a dataset adapter and registering it in `datasets/
 
 Add a RAG system by implementing `RagSystem`, adding it to `systems/registry.py`, and giving it a config entry.
 
-Add a model provider by implementing `TextGenerationClient` and wiring it in `models/factory.py`.
+Add a model provider by implementing `TextGenerationClient` and/or `EmbeddingClient` and wiring it in `models/factory.py`.
 
 Add a workflow backend by implementing `WorkflowRunner` and selecting it through `workflow.runner`.
 

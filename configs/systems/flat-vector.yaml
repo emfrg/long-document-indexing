@@ -2,5 +2,4 @@ system:
   id: flat_vector
   type: native
   indexing_strategy: raw_segments
-  retrieval_backend: local_vector
-
+  retrieval_backend: dense_vector

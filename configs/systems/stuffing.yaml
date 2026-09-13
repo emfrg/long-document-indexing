@@ -2,6 +2,5 @@ system:
   id: stuffing
   type: native
   indexing_strategy: stuffing
-  retrieval_backend: local_vector
+  retrieval_backend: dense_vector
   overflow_policy: mark_context_overflow
-

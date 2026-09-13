@@ -168,6 +168,7 @@ class OutlineThenFillSystem(DocumentMapSystemBase):
         signature = input_signature(
             self.id,
             PROMPT_SAFETY_POLICY_VERSION,
+            services.map_generation_signature,
             corpus.id,
             document.id,
             self.construction_method,
@@ -267,6 +268,7 @@ class OutlineThenFillSystem(DocumentMapSystemBase):
         signature = input_signature(
             self.id,
             PROMPT_SAFETY_POLICY_VERSION,
+            services.map_generation_signature,
             corpus.id,
             document.id,
             self.construction_method,
@@ -359,6 +361,7 @@ class OutlineThenFillSystem(DocumentMapSystemBase):
         signature = input_signature(
             self.id,
             PROMPT_SAFETY_POLICY_VERSION,
+            services.map_generation_signature,
             corpus.id,
             document.id,
             self.construction_method,

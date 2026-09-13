@@ -28,6 +28,29 @@ class GenerationResponse(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class EmbeddingResponse(BaseModel):
+    """Provider-neutral embedding response for one ordered text batch."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    embeddings: list[list[float]]
+    usage: UsageRecord = Field(default_factory=UsageRecord)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
 class TextGenerationClient(Protocol):
+    @property
+    def model_id(self) -> str:
+        """Stable model identifier used in persisted execution signatures."""
+
     async def generate(self, request: GenerationRequest) -> GenerationResponse:
         """Generate text for a provider-neutral request."""
+
+
+class EmbeddingClient(Protocol):
+    @property
+    def model_id(self) -> str:
+        """Stable model identifier included in persisted index signatures."""
+
+    async def embed(self, texts: list[str]) -> EmbeddingResponse:
+        """Embed texts while preserving input order."""

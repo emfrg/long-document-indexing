@@ -9,6 +9,7 @@ from long_document_indexing.domain.corpus import Corpus
 from long_document_indexing.domain.maps import IndexArtifact
 from long_document_indexing.domain.runs import RagRunRecord
 from long_document_indexing.services import Services
+from long_document_indexing.systems.map_base import combine_usage
 from long_document_indexing.telemetry.tracing import stable_query_run_id
 
 
@@ -25,13 +26,21 @@ class FlatVectorSystem:
     ) -> IndexArtifact:
         del pipeline
         index_id = await services.retrieval_backend.index(corpus)
+        retrieval_usage = services.retrieval_backend.consume_usage()
         artifact_path = services.retrieval_backend.artifact_path(index_id)
+        build_metadata = {
+            "backend": services.retrieval_backend.__class__.__name__,
+            "retrieval_backend": services.retrieval_backend.__class__.__name__,
+            "index_config_signature": services.index_config_signature(self.id),
+        }
+        if retrieval_usage.model_calls or retrieval_usage.input_tokens:
+            build_metadata["usage"] = retrieval_usage.model_dump(mode="json")
         return IndexArtifact(
             id=index_id,
             system_id=self.id,
             corpus_id=corpus.id,
             artifact_path=str(artifact_path) if artifact_path is not None else index_id,
-            build_metadata={"backend": services.retrieval_backend.__class__.__name__},
+            build_metadata=build_metadata,
         )
 
     async def run_query(
@@ -53,6 +62,7 @@ class FlatVectorSystem:
             document_ids=None,
             top_k=pipeline.retrieved_segments,
         )
+        retrieval_usage = services.retrieval_backend.consume_usage()
         selected_document_ids = _unique_document_ids(retrieved_items)[: pipeline.selected_documents]
         answer_result = await answer_from_retrieved_evidence(
             item=item,
@@ -73,7 +83,7 @@ class FlatVectorSystem:
             answer=answer_result.answer,
             citations=answer_result.citations,
             usage=query_usage(
-                answer_result.usage,
+                combine_usage(retrieval_usage, answer_result.usage),
                 tool_calls=1,
                 duration_ms=duration_ms,
             ),
