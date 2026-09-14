@@ -50,11 +50,12 @@ The corresponding Foundry managed evaluation should use RAG evaluators such as
 
 `rag-qa-extended.jsonl` is the fixed comparison set used for the extended study:
 
-- 20 case files across 11 civil-rights legal domains.
-- 40 evidence-labelled questions: 20 single-document and 20 multi-document.
+- 20 case files across 12 civil-rights legal domains.
+- 60 evidence-labelled questions: 20 single-document, 20 multi-document, and 20
+  three-stage chained multi-document questions.
 - At most eight source documents per case.
 - Exact document IDs, segment IDs, and source quotes for deterministic RAG metrics.
-- Seven systems, producing 280 system-question runs and exported rows.
+- Seven systems, producing 420 system-question runs and exported rows.
 
 The case selection and its provenance are recorded in
 `rag-qa-extended-case-manifest.json`. The adapter validates every evidence quote against
@@ -68,6 +69,7 @@ uv run --python 3.13 --extra foundry --extra multilexsum --no-editable --reinsta
 uv run --python 3.13 --extra foundry --extra multilexsum --no-editable --reinstall-package long-document-indexing ldi run --config configs/experiments/foundry-multilexsum-legal-rag-qa-role-separated-extended.yaml
 ```
 
-The run is resumable and bounded at 5,000 model calls and 28 million recorded tokens.
+The map router can select up to three documents so the chained tier is answerable. The
+run is resumable and bounded at 5,000 model calls and 28 million recorded tokens.
 Those are safety ceilings, not targets. The preceding two-case role-separated smoke run
 is the pilot for deployment and credential validation.

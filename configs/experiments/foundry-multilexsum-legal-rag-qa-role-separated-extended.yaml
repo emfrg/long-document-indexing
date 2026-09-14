@@ -39,7 +39,7 @@ models:
 shared_pipeline:
   segment_tokens: 6000
   segment_overlap_tokens: 250
-  selected_documents: 2
+  selected_documents: 3
   retrieved_segments: 8
 
 workflow:
@@ -112,7 +112,7 @@ evaluation:
     managed_retry_delay_seconds: 30
     fail_on_evaluator_errors: true
     tags:
-      benchmark_variant: role-separated-extended-v1
+      benchmark_variant: role-separated-extended-v2
 
 storage:
   artifacts_dir: artifacts

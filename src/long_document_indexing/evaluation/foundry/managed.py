@@ -528,6 +528,8 @@ def _managed_row_stratum(row: Mapping[str, Any]) -> str:
     tags = {str(tag) for tag in row.get("tags", [])}
     if "single_hop" in tags:
         return "single_hop"
+    if "chained_multi_hop" in tags:
+        return "chained_multi_hop"
     if "multi_hop" in tags:
         return "multi_hop"
     return "other"

@@ -51,6 +51,6 @@
   "source_dataset_revision": "055f5fa5300a5fdefb5b691c4d6c1e58f485b379",
   "source_split": "test",
   "question_set": "rag-qa-extended.jsonl",
-  "question_count": 40,
-  "annotation_policy": "One single-document and one multi-document question per case, with exact source quotes."
+  "question_count": 60,
+  "annotation_policy": "One single-document, one multi-document, and one three-stage chained multi-document question per case, with exact source quotes."
 }

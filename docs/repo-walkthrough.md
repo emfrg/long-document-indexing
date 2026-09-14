@@ -126,10 +126,11 @@ uv run --python 3.13 --extra foundry --extra multilexsum --no-editable --reinsta
 uv run --python 3.13 --extra foundry --extra multilexsum --no-editable --reinstall-package long-document-indexing ldi publish-foundry-evals --config configs/experiments/foundry-multilexsum-legal-rag-qa-role-separated-extended.yaml --evaluation-name ldi-multilexsum-legal-rag-qa-extended --run-name rag-qa-role-separated-extended-visible
 ```
 
-The extended assets contain 20 explicit case IDs and 40 evidence-labelled questions.
-The local and portal-visible comparison covers all 280 system/question rows. Managed
-model judging uses a fixed 20% question sample shared by all seven systems and stores
-per-system evaluator checkpoints and metrics.
+The extended assets contain 20 explicit case IDs and 60 evidence-labelled questions:
+20 single-document, 20 multi-document, and 20 three-stage chained multi-document items.
+The local and portal-visible comparison covers all 420 system/question rows. Managed
+model judging uses a fixed 20% sample from each difficulty tier, shared by all seven
+systems, and stores per-system evaluator checkpoints and metrics.
 
 Regenerate a report from existing artifacts:
 

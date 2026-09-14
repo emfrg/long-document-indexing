@@ -394,7 +394,7 @@ def test_managed_evaluation_samples_same_items_and_reports_each_system(tmp_path)
             ground_truth=GroundTruth(expected_answer="Expected."),
             tags={question_type},
         )
-        for question_type in ("single_hop", "multi_hop")
+        for question_type in ("single_hop", "multi_hop", "chained_multi_hop")
         for index in range(2)
     }
     records = [
@@ -432,12 +432,12 @@ def test_managed_evaluation_samples_same_items_and_reports_each_system(tmp_path)
     )
 
     assert [system_id for system_id, _ in calls] == ["flat_vector", "map_reduce"]
-    assert all(len(rows) == 2 for _, rows in calls)
+    assert all(len(rows) == 3 for _, rows in calls)
     assert {row["item_id"] for row in calls[0][1]} == {row["item_id"] for row in calls[1][1]}
-    assert result.row_count == 4
+    assert result.row_count == 6
     assert result.metrics == {"groundedness.score": 3.0}
-    assert result.metadata["selected_item_count"] == 2
-    assert result.metadata["source_row_count"] == 8
+    assert result.metadata["selected_item_count"] == 3
+    assert result.metadata["source_row_count"] == 12
     assert set(result.metadata["scope_results"]) == {"flat_vector", "map_reduce"}
     assert result.metadata["scope_results"]["flat_vector"]["metrics"] == {
         "groundedness.score": 2.0

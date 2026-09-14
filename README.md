@@ -305,19 +305,20 @@ This config uses evidence-labeled questions rather than whole-case summary promp
 its report includes context precision/recall, evidence quote recall, citation precision,
 citation recall, and citation support rate.
 
-Run the fixed 20-case, 40-question comparison after the smoke run succeeds:
+Run the fixed 20-case, 60-question comparison after the smoke run succeeds:
 
 ```bash
 uv run --python 3.13 --extra foundry --extra multilexsum --no-editable --reinstall-package long-document-indexing ldi run --config configs/experiments/foundry-multilexsum-legal-rag-qa-role-separated-extended.yaml --dry-run-budget
 uv run --python 3.13 --extra foundry --extra multilexsum --no-editable --reinstall-package long-document-indexing ldi run --config configs/experiments/foundry-multilexsum-legal-rag-qa-role-separated-extended.yaml
 ```
 
-The extended config compares all seven systems and exports 280 rows. Its managed
+The extended config compares all seven systems and exports 420 rows. Its managed
 evaluation takes the same deterministic 20% question sample for every system: four
-single-document plus four multi-document questions, or 56 judged rows total. It runs and
+single-document, four multi-document, and four chained multi-document questions, or 84
+judged rows total. It runs and
 checkpoints each evaluator separately for each system, so rerunning after a connection
 error reuses completed system/evaluator pairs. Each SDK call contains one evaluator and
-eight rows, with evaluator errors configured to fail and retry that small unit.
+twelve rows, with evaluator errors configured to fail and retry that small unit.
 
 Preview and run the sampled managed evaluation:
 
@@ -326,7 +327,7 @@ uv run --python 3.13 --extra foundry --extra multilexsum --no-editable --reinsta
 uv run --python 3.13 --extra foundry --extra multilexsum --no-editable --reinstall-package long-document-indexing ldi evaluate-foundry-managed --config configs/experiments/foundry-multilexsum-legal-rag-qa-role-separated-extended.yaml
 ```
 
-Publish all 280 deterministic RAG-metric rows as seven comparable Foundry runs:
+Publish all 420 deterministic RAG-metric rows as seven comparable Foundry runs:
 
 ```bash
 uv run --python 3.13 --extra foundry --extra multilexsum --no-editable --reinstall-package long-document-indexing ldi publish-foundry-evals --config configs/experiments/foundry-multilexsum-legal-rag-qa-role-separated-extended.yaml --evaluation-name ldi-multilexsum-legal-rag-qa-extended --run-name rag-qa-role-separated-extended-visible
