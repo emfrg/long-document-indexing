@@ -5,7 +5,11 @@ from pathlib import Path
 import pytest
 
 from long_document_indexing.config import ModelConfig, load_experiment_config
-from long_document_indexing.models.factory import create_text_generation_client
+from long_document_indexing.models.embeddings import OpenAICompatibleEmbeddingClient
+from long_document_indexing.models.factory import (
+    create_embedding_client,
+    create_text_generation_client,
+)
 from long_document_indexing.models.fake import FakeTextGenerationClient
 from long_document_indexing.models.openai_compatible import OpenAICompatibleTextGenerationClient
 
@@ -23,6 +27,7 @@ def test_model_factory_creates_foundry_client_without_importing_openai() -> None
             generator_base_url="https://example.openai.azure.com/openai/v1/",
             generator_deployment="doc-map",
             generator_api="responses",
+            generator_max_retries=9,
             generator_response_format="structured",
         )
     )
@@ -30,7 +35,26 @@ def test_model_factory_creates_foundry_client_without_importing_openai() -> None
     assert isinstance(client, OpenAICompatibleTextGenerationClient)
     assert client.deployment == "doc-map"
     assert client.api == "responses"
+    assert client.max_retries == 9
     assert client.response_format == "structured"
+
+
+def test_model_factory_configures_token_safe_embedding_client() -> None:
+    client = create_embedding_client(
+        ModelConfig(
+            generator_provider="foundry",
+            generator_base_url="https://example.openai.azure.com/openai/v1/",
+            embedding_deployment="text-embedding-3-large",
+            embedding_max_input_tokens=8000,
+            embedding_max_batch_tokens=200_000,
+            embedding_max_retries=9,
+        )
+    )
+
+    assert isinstance(client, OpenAICompatibleEmbeddingClient)
+    assert client.max_input_tokens == 8000
+    assert client.max_batch_tokens == 200_000
+    assert client.max_retries == 9
 
 
 def test_model_factory_selects_explicit_role_deployments_with_generator_fallback() -> None:

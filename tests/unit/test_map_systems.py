@@ -106,7 +106,8 @@ async def test_advanced_map_systems_record_strategy_metadata(tmp_path) -> None:
 
 async def test_stuffing_marks_context_overflow(tmp_path) -> None:
     corpus = _corpus()
-    services = _services(tmp_path)
+    progress: list[str] = []
+    services = _services(tmp_path, progress=progress.append)
     system = StuffingSystem()
 
     artifact = await run_indexing_workflow(
@@ -119,6 +120,8 @@ async def test_stuffing_marks_context_overflow(tmp_path) -> None:
 
     assert artifact.document_map_ids == []
     assert set(artifact.build_metadata["document_statuses"].values()) == {"context_overflow"}
+    assert progress[0].startswith("stuffing indexing corpus: document 1/2")
+    assert progress[1] == "stuffing skipped corpus/doc_alpha: context overflow"
 
 
 async def test_mapped_query_can_generate_model_backed_answer(tmp_path) -> None:
@@ -160,6 +163,53 @@ async def test_mapped_query_can_generate_model_backed_answer(tmp_path) -> None:
     assert {citation.segment_id for citation in record.citations} <= {
         retrieved.segment_id for retrieved in record.retrieved_items
     }
+
+
+async def test_map_generation_recovers_from_sensitive_content_refusal(tmp_path) -> None:
+    corpus = Corpus(
+        id="employment-case",
+        documents=[
+            Document(
+                id="complaint",
+                corpus_id="employment-case",
+                segments=[
+                    Segment(
+                        id="complaint_s1",
+                        document_id="complaint",
+                        order=1,
+                        text=(
+                            "The complaint alleges sexual harassment, sexual propositions, "
+                            "offensive touching involving her breasts and backside, and the "
+                            "remark \"I'm horny.\""
+                        ),
+                    )
+                ],
+            )
+        ],
+    )
+    client = _SensitiveContentRefusalClient()
+    progress: list[str] = []
+    services = _services(
+        tmp_path,
+        generator_client=client,
+        progress=progress.append,
+    )
+
+    artifact = await run_indexing_workflow(
+        system=StuffingSystem(),
+        corpus=corpus,
+        services=services,
+        pipeline=SharedPipelineConfig(selected_documents=1, retrieved_segments=1),
+        experiment_id="exp",
+    )
+
+    assert len(client.prompts) == 2
+    assert "sexual harassment" in client.prompts[0].lower()
+    assert "sexual" not in client.prompts[1].lower()
+    assert client.prompts[1].startswith("Recovery instruction:")
+    assert artifact.build_metadata["usage"]["model_calls"] == 2
+    assert "stuffing waiting for map-builder response complaint" in progress
+    assert any("retrying with neutral legal abstraction" in message for message in progress)
 
 
 async def test_map_build_normalizes_invalid_source_references_before_persistence(
@@ -470,6 +520,22 @@ class _FlakyMapReduceClient:
                 raise RuntimeError("planned map failure")
         elif task == "reduce_document_maps":
             self.reduce_calls += 1
+        return await self._fake.generate(request)
+
+
+class _SensitiveContentRefusalClient:
+    def __init__(self) -> None:
+        self.prompts: list[str] = []
+        self._fake = FakeTextGenerationClient()
+
+    @property
+    def model_id(self) -> str:
+        return "sensitive-content-refusal-test"
+
+    async def generate(self, request: GenerationRequest) -> GenerationResponse:
+        self.prompts.append(request.prompt)
+        if len(self.prompts) == 1:
+            DocumentMap.model_validate_json("I'm sorry, but I cannot assist with that request.")
         return await self._fake.generate(request)
 
 

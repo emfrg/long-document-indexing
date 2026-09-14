@@ -6,18 +6,22 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
 
+from pydantic import ValidationError
+
 from long_document_indexing.answering import answer_from_retrieved_evidence, query_usage
 from long_document_indexing.config import SharedPipelineConfig
 from long_document_indexing.domain.benchmark import BenchmarkItem
 from long_document_indexing.domain.corpus import Corpus, Document, Segment
 from long_document_indexing.domain.maps import DocumentMap, IndexArtifact, MapEntry, SourceReference
 from long_document_indexing.domain.runs import RagRunRecord, UsageRecord
-from long_document_indexing.models.base import GenerationRequest, GenerationResponse
+from long_document_indexing.models.base import GenerationRequest, TextGenerationClient
 from long_document_indexing.models.structured_outputs import StructuredDocumentMap
+from long_document_indexing.progress import await_with_progress
 from long_document_indexing.prompt_safety import (
     PROMPT_SAFETY_POLICY_VERSION,
     apply_prompt_safety_preamble,
     sanitize_for_model_prompt,
+    sanitize_for_model_recovery_prompt,
     sanitize_prompt_payload,
 )
 from long_document_indexing.prompts import render_prompt
@@ -30,6 +34,7 @@ from long_document_indexing.text import (
 )
 
 MAP_SOURCE_REFERENCE_NORMALIZATION_POLICY_VERSION = "source-reference-normalization/v2"
+MAP_GENERATION_MAX_ATTEMPTS = 3
 
 
 @dataclass
@@ -224,8 +229,9 @@ class DocumentMapSystemBase(ABC):
                 ),
             )
         )
-        response = await client.generate(
-            GenerationRequest(
+        document_map, usage = await _generate_map_with_recovery(
+            client=client,
+            request=GenerationRequest(
                 prompt=prompt,
                 prompt_name="/".join(prompt_parts),
                 metadata={
@@ -236,13 +242,10 @@ class DocumentMapSystemBase(ABC):
                     **(extra_metadata or {}),
                 },
                 response_model=StructuredDocumentMap,
-            )
+            ),
+            services=services,
         )
-        document_map = normalize_document_map_source_references(
-            DocumentMap.model_validate_json(response.content),
-            document,
-        )
-        return document_map, response.usage
+        return normalize_document_map_source_references(document_map, document), usage
 
 
 def combine_usage(*records: UsageRecord) -> UsageRecord:
@@ -576,8 +579,9 @@ async def reduce_maps_with_model(
             },
         )
     )
-    response: GenerationResponse = await client.generate(
-        GenerationRequest(
+    document_map, usage = await _generate_map_with_recovery(
+        client=client,
+        request=GenerationRequest(
             prompt=prompt,
             prompt_name="/".join(prompt_parts),
             metadata={
@@ -589,14 +593,12 @@ async def reduce_maps_with_model(
                 ],
             },
             response_model=StructuredDocumentMap,
-        )
+        ),
+        services=services,
     )
     return (
-        normalize_document_map_source_references(
-            DocumentMap.model_validate_json(response.content),
-            document,
-        ),
-        response.usage,
+        normalize_document_map_source_references(document_map, document),
+        usage,
     )
 
 
@@ -630,8 +632,9 @@ async def refine_map_with_model(
             },
         )
     )
-    response = await client.generate(
-        GenerationRequest(
+    document_map, usage = await _generate_map_with_recovery(
+        client=client,
+        request=GenerationRequest(
             prompt=prompt,
             prompt_name="/".join(prompt_parts),
             metadata={
@@ -644,12 +647,85 @@ async def refine_map_with_model(
                 else None,
             },
             response_model=StructuredDocumentMap,
-        )
+        ),
+        services=services,
     )
     return (
-        normalize_document_map_source_references(
-            DocumentMap.model_validate_json(response.content),
-            document,
-        ),
-        response.usage,
+        normalize_document_map_source_references(document_map, document),
+        usage,
+    )
+
+
+async def _generate_map_with_recovery(
+    *,
+    client: TextGenerationClient,
+    request: GenerationRequest,
+    services: Services,
+) -> tuple[DocumentMap, UsageRecord]:
+    current_request = request
+    failed_calls = 0
+    for attempt in range(1, MAP_GENERATION_MAX_ATTEMPTS + 1):
+        try:
+            response = await await_with_progress(
+                client.generate(current_request),
+                emit=services.progress,
+                message=_map_generation_progress_message(current_request),
+            )
+            document_map = DocumentMap.model_validate_json(response.content)
+        except Exception as exc:
+            if attempt == MAP_GENERATION_MAX_ATTEMPTS or not _recoverable_map_error(exc):
+                raise
+            failed_calls += 1
+            services.emit_progress(
+                "document map generation returned invalid or filtered structured output; "
+                f"retrying with neutral legal abstraction ({attempt + 1}/"
+                f"{MAP_GENERATION_MAX_ATTEMPTS})"
+            )
+            current_request = request.model_copy(
+                update={"prompt": sanitize_for_model_recovery_prompt(request.prompt)}
+            )
+            continue
+
+        if failed_calls:
+            usage = response.usage.model_copy(
+                update={"model_calls": response.usage.model_calls + failed_calls}
+            )
+            return document_map, usage
+        return document_map, response.usage
+
+    raise AssertionError("document map recovery loop terminated unexpectedly")
+
+
+def _map_generation_progress_message(request: GenerationRequest) -> str:
+    strategy = str(request.metadata.get("strategy", "document_map"))
+    document_id = str(request.metadata.get("document_id", "unknown-document"))
+    task = str(request.metadata.get("task", "document_map"))
+    if task == "refine_document_map":
+        segments = request.metadata.get("segments", [])
+        segment_id = (
+            str(segments[0].get("id"))
+            if isinstance(segments, list) and segments and isinstance(segments[0], dict)
+            else "unknown-segment"
+        )
+        return f"{strategy} waiting for map-builder response {document_id}/{segment_id}"
+    if task == "reduce_document_maps":
+        return f"{strategy} waiting for map-builder reduction {document_id}"
+    return f"{strategy} waiting for map-builder response {document_id}"
+
+
+def _recoverable_map_error(exc: Exception) -> bool:
+    if isinstance(exc, ValidationError):
+        return True
+    message = str(exc).lower()
+    return any(
+        marker in message
+        for marker in (
+            "cannot assist",
+            "can't assist",
+            "content_filter",
+            "invalid json",
+            "parsed structured output",
+            "responsibleaipolicyviolation",
+            "unable to assist",
+        )
     )

@@ -27,7 +27,7 @@ from long_document_indexing.workflows.common_query import (
 )
 
 
-def test_resume_reuses_succeeded_index_and_query_artifacts(tmp_path) -> None:
+def test_resume_reuses_succeeded_index_and_query_artifacts(tmp_path, capsys) -> None:
     config = _foundry_export_smoke_config(tmp_path)
 
     _prepare(config)
@@ -38,6 +38,7 @@ def test_resume_reuses_succeeded_index_and_query_artifacts(tmp_path) -> None:
     index_usage_count = _jsonl_count(experiment_dir / "costs/index-usage.jsonl")
     query_usage_count = _jsonl_count(experiment_dir / "costs/query-usage.jsonl")
     run_count = _jsonl_count(experiment_dir / "runs/stuffing.jsonl")
+    capsys.readouterr()
 
     resume_config = config.model_copy(update={"run_control": RunControlConfig(resume=True)})
     asyncio.run(_index(resume_config))
@@ -53,6 +54,11 @@ def test_resume_reuses_succeeded_index_and_query_artifacts(tmp_path) -> None:
     assert all(record.index_artifact_id for record in records)
     assert all(record.index_artifact_signature for record in records)
     assert all(record.query_config_signature for record in records)
+    output = capsys.readouterr().out
+    assert "Indexing system 1/1: stuffing" in output
+    assert "stuffing reused case 1/1: smoke-corpus" in output
+    assert "Querying system 1/1: stuffing" in output
+    assert "stuffing reused question 1/2: q_alpha_approval" in output
 
 
 def test_stale_map_artifacts_are_not_reusable(tmp_path) -> None:

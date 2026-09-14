@@ -10,6 +10,7 @@ from long_document_indexing.models.structured_outputs import (
     StructuredAnswerCitation,
     StructuredGeneratedAnswer,
 )
+from long_document_indexing.progress import await_with_progress
 from long_document_indexing.prompt_safety import (
     apply_prompt_safety_preamble,
     sanitize_for_model_prompt,
@@ -106,17 +107,21 @@ async def _generated_answer(
             },
         )
     )
-    response = await client.generate(
-        GenerationRequest(
-            prompt=prompt,
-            prompt_name="shared/answer",
-            metadata={
-                "task": "answer_query",
-                "query": item.query,
-                "evidence": evidence,
-            },
-            response_model=StructuredGeneratedAnswer,
-        )
+    response = await await_with_progress(
+        client.generate(
+            GenerationRequest(
+                prompt=prompt,
+                prompt_name="shared/answer",
+                metadata={
+                    "task": "answer_query",
+                    "query": item.query,
+                    "evidence": evidence,
+                },
+                response_model=StructuredGeneratedAnswer,
+            )
+        ),
+        emit=services.progress,
+        message="answering waiting for model response",
     )
     generated = StructuredGeneratedAnswer.model_validate_json(response.content)
     return AnswerResult(

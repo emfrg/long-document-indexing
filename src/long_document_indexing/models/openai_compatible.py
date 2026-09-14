@@ -33,6 +33,7 @@ class OpenAICompatibleTextGenerationClient:
         temperature: float = 0.0,
         max_output_tokens: int | None = None,
         timeout_seconds: float = 60.0,
+        max_retries: int = 12,
         response_format: ResponseFormat = "json_object",
         client: Any | None = None,
         token_provider: Callable[[], str] | None = None,
@@ -47,6 +48,7 @@ class OpenAICompatibleTextGenerationClient:
         self.temperature = temperature
         self.max_output_tokens = max_output_tokens
         self.timeout_seconds = timeout_seconds
+        self.max_retries = max_retries
         self.response_format = response_format
         self._client = client
         self._token_provider = token_provider
@@ -217,6 +219,7 @@ class OpenAICompatibleTextGenerationClient:
         kwargs: dict[str, Any] = {
             "base_url": self.base_url,
             "timeout": self.timeout_seconds,
+            "max_retries": self.max_retries,
         }
         if self.auth_mode == "api_key":
             kwargs["api_key"] = self._required_api_key()

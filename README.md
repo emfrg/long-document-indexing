@@ -312,6 +312,11 @@ uv run --python 3.13 --extra foundry --extra multilexsum --no-editable --reinsta
 uv run --python 3.13 --extra foundry --extra multilexsum --no-editable --reinstall-package long-document-indexing ldi run --config configs/experiments/foundry-multilexsum-legal-rag-qa-role-separated-extended.yaml
 ```
 
+Long runs report the current system, case, document, and question; checkpoint and
+artifact reuse; routing, embedding, map-building, and answering calls; and a heartbeat
+every 60 seconds while waiting for a remote model response. These messages are
+observational only and do not change execution, retry, checkpoint, or budget behavior.
+
 The extended config compares all seven systems and exports 420 rows. Its managed
 evaluation takes the same deterministic 20% question sample for every system: four
 single-document, four multi-document, and four chained multi-document questions, or 84

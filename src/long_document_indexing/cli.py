@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import json
+import time
 from collections.abc import Coroutine
 from pathlib import Path
 from typing import Annotated, Any
@@ -359,15 +360,29 @@ async def _index(
     }
     indexed = 0
     reused = 0
+    system_count = len(config.systems)
+    corpus_count = len(loaded.corpora)
 
-    for system_id in config.systems:
+    services.emit_progress(
+        f"Starting indexing: {system_count} system(s), {corpus_count} case(s)"
+    )
+
+    for system_index, system_id in enumerate(config.systems, start=1):
         system = _create_system(config, system_id)
-        for corpus in loaded.corpora:
+        services.emit_progress(f"Indexing system {system_index}/{system_count}: {system.id}")
+        for corpus_index, corpus in enumerate(loaded.corpora, start=1):
             key = (system.id, corpus.id)
             if key in artifacts_by_key:
                 reused += 1
+                services.emit_progress(
+                    f"{system.id} reused case {corpus_index}/{corpus_count}: {corpus.id}"
+                )
                 continue
 
+            services.emit_progress(
+                f"{system.id} indexing case {corpus_index}/{corpus_count}: {corpus.id}"
+            )
+            started = time.perf_counter()
             label = f"index {system.id}/{corpus.id}"
             budget.require_available(label)
             artifact = await run_indexing_workflow(
@@ -386,7 +401,16 @@ async def _index(
                 "costs/index-usage.jsonl",
                 preserve_existing=run_control.resume and not run_control.force,
             )
+            elapsed = time.perf_counter() - started
+            services.emit_progress(
+                f"{system.id} indexed case {corpus_index}/{corpus_count}: "
+                f"{corpus.id} ({elapsed:.1f}s)"
+            )
             budget.require_not_exceeded(label)
+
+        services.emit_progress(
+            f"Completed indexing system {system_index}/{system_count}: {system.id}"
+        )
 
     _write_index_artifacts(config, loaded, services.artifact_store, artifacts_by_key)
     _write_usage(
@@ -416,9 +440,26 @@ async def _query(
     )
     artifacts = _load_index_artifacts(services.artifact_store)
     corpora_by_id = {corpus.id: corpus for corpus in loaded.corpora}
+    system_count = len(config.systems)
 
-    for system_id in config.systems:
+    services.emit_progress(f"Starting queries: {system_count} system(s)")
+
+    for system_index, system_id in enumerate(config.systems, start=1):
         system = _create_system(config, system_id)
+        system_artifacts = [
+            artifact for artifact in artifacts if artifact.system_id == system.id
+        ]
+        question_count = sum(
+            sum(
+                1
+                for item in loaded.question_set.items
+                if item.corpus_id == artifact.corpus_id
+            )
+            * config.experiment.query_repetitions
+            for artifact in system_artifacts
+        )
+        question_index = 0
+        services.emit_progress(f"Querying system {system_index}/{system_count}: {system.id}")
         records_by_run_id: dict[str, RagRunRecord] = (
             {
                 record.run_id: record
@@ -430,15 +471,20 @@ async def _query(
         queried = 0
         reused = 0
         skipped = 0
-        for artifact in artifacts:
-            if artifact.system_id != system.id:
-                continue
+        for artifact in system_artifacts:
             corpus = corpora_by_id[artifact.corpus_id]
             items = [
                 item for item in loaded.question_set.items if item.corpus_id == artifact.corpus_id
             ]
             for item in items:
                 for repetition in range(config.experiment.query_repetitions):
+                    question_index += 1
+                    question_label = item.id
+                    if config.experiment.query_repetitions > 1:
+                        question_label += (
+                            f" repetition {repetition + 1}/"
+                            f"{config.experiment.query_repetitions}"
+                        )
                     run_id = stable_query_run_id(
                         config.experiment.id,
                         system.id,
@@ -452,6 +498,10 @@ async def _query(
                         expected_query_config_signature=services.query_config_signature,
                     ):
                         reused += 1
+                        services.emit_progress(
+                            f"{system.id} reused question {question_index}/{question_count}: "
+                            f"{question_label}"
+                        )
                         continue
 
                     label = f"query {system.id}/{item.id}/rep-{repetition}"
@@ -468,6 +518,10 @@ async def _query(
                             reason=exhausted_reason,
                         )
                         skipped += 1
+                        services.emit_progress(
+                            f"{system.id} skipped question {question_index}/{question_count}: "
+                            f"{question_label}"
+                        )
                         _write_system_run_records(
                             services.artifact_store,
                             system.id,
@@ -475,6 +529,11 @@ async def _query(
                         )
                         continue
 
+                    services.emit_progress(
+                        f"{system.id} querying question {question_index}/{question_count}: "
+                        f"{question_label}"
+                    )
+                    started = time.perf_counter()
                     record = await run_query_workflow(
                         system=system,
                         item=item,
@@ -498,6 +557,11 @@ async def _query(
                         "costs/query-usage.jsonl",
                         preserve_existing=run_control.resume and not run_control.force,
                     )
+                    elapsed = time.perf_counter() - started
+                    services.emit_progress(
+                        f"{system.id} answered question {question_index}/{question_count}: "
+                        f"{question_label} ({elapsed:.1f}s)"
+                    )
                     budget.require_not_exceeded(label)
         _write_system_run_records(services.artifact_store, system.id, records_by_run_id)
         message = f"Queried {queried} item run(s) for {system.id}"
@@ -506,6 +570,9 @@ async def _query(
         if skipped:
             message += f"; skipped {skipped}"
         typer.echo(message)
+        services.emit_progress(
+            f"Completed querying system {system_index}/{system_count}: {system.id}"
+        )
     _write_usage(
         services,
         "costs/query-usage.jsonl",
@@ -796,6 +863,7 @@ def _services(config: ExperimentConfig) -> Services:
             store.path("indexes", "dense_vector"),
             embedding_client,
             batch_size=config.models.embedding_batch_size,
+            progress=typer.echo,
         )
     elif backend_name == "local_vector":
         retrieval_backend = LocalVectorBackend(store.path("indexes", "local_vector"))

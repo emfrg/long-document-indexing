@@ -3,12 +3,14 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from long_document_indexing.domain.corpus import Corpus
 from long_document_indexing.domain.runs import RetrievedItem, UsageRecord
 from long_document_indexing.models.base import EmbeddingClient
+from long_document_indexing.progress import await_with_progress
 
 DENSE_INDEX_VERSION = "dense-vector/v1"
 
@@ -22,6 +24,7 @@ class DenseVectorBackend:
         embedding_client: EmbeddingClient,
         *,
         batch_size: int = 64,
+        progress: Callable[[str], None] | None = None,
     ) -> None:
         if batch_size < 1:
             raise ValueError("embedding batch size must be positive")
@@ -29,6 +32,7 @@ class DenseVectorBackend:
         self.artifact_dir.mkdir(parents=True, exist_ok=True)
         self.embedding_client = embedding_client
         self.batch_size = batch_size
+        self.progress = progress
         self._indexes: dict[str, dict[str, Any]] = {}
         self._pending_usage = UsageRecord()
 
@@ -40,6 +44,11 @@ class DenseVectorBackend:
             payload = json.loads(path.read_text(encoding="utf-8"))
             _validate_index(payload, expected_model_id=self.embedding_client.model_id)
             self._indexes[index_id] = payload
+            if self.progress is not None:
+                self.progress(
+                    f"dense_vector reused embeddings {corpus.id} "
+                    f"({len(payload['records'])} segment(s))"
+                )
             return index_id
 
         records = [
@@ -54,9 +63,18 @@ class DenseVectorBackend:
         ]
         embeddings: list[list[float]] = []
         usage_records: list[UsageRecord] = []
+        batch_count = math.ceil(len(records) / self.batch_size)
         for start in range(0, len(records), self.batch_size):
             batch = records[start : start + self.batch_size]
-            response = await self.embedding_client.embed([str(record["text"]) for record in batch])
+            batch_number = start // self.batch_size + 1
+            response = await await_with_progress(
+                self.embedding_client.embed([str(record["text"]) for record in batch]),
+                emit=self.progress,
+                message=(
+                    f"dense_vector embedding {corpus.id}: batch "
+                    f"{batch_number}/{batch_count} ({len(batch)} segment(s))"
+                ),
+            )
             embeddings.extend(response.embeddings)
             usage_records.append(response.usage)
 
@@ -94,7 +112,11 @@ class DenseVectorBackend:
             return []
 
         index = self._load(index_id)
-        response = await self.embedding_client.embed([query])
+        response = await await_with_progress(
+            self.embedding_client.embed([query]),
+            emit=self.progress,
+            message="dense_vector embedding query",
+        )
         self._pending_usage = response.usage
         if len(response.embeddings) != 1:
             raise RuntimeError("query embedding response must contain exactly one vector")

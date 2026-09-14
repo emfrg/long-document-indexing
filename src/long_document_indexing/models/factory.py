@@ -43,6 +43,7 @@ def create_text_generation_client(
             temperature=config.generator_temperature,
             max_output_tokens=config.generator_max_output_tokens,
             timeout_seconds=config.generator_timeout_seconds,
+            max_retries=config.generator_max_retries,
             response_format=config.generator_response_format,
         )
 
@@ -85,6 +86,9 @@ def create_embedding_client(config: ModelConfig) -> EmbeddingClient:
             azure_scope=config.embedding_azure_scope or config.generator_azure_scope,
             timeout_seconds=config.embedding_timeout_seconds,
             dimensions=config.embedding_dimensions,
+            max_input_tokens=config.embedding_max_input_tokens,
+            max_batch_tokens=config.embedding_max_batch_tokens,
+            max_retries=config.embedding_max_retries,
         )
 
     raise ValueError(f"unsupported embedding provider: {provider}")

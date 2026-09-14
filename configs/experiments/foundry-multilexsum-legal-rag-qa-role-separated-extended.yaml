@@ -31,9 +31,11 @@ models:
   answer_deployment: ${FOUNDRY_ANSWER_MODEL}
   judge_deployment: ${FOUNDRY_JUDGE_MODEL}
   embedding_deployment: ${FOUNDRY_EMBEDDING_MODEL:-text-embedding-3-large}
+  embedding_max_retries: ${FOUNDRY_EMBEDDING_MAX_RETRIES:-12}
   generator_api_key_env: AZURE_INFERENCE_CREDENTIAL
   generator_auth_mode: api_key
   generator_max_output_tokens: ${FOUNDRY_GENERATOR_MAX_OUTPUT_TOKENS:-12000}
+  generator_max_retries: ${FOUNDRY_GENERATOR_MAX_RETRIES:-12}
   generator_response_format: ${FOUNDRY_GENERATOR_RESPONSE_FORMAT:-structured}
 
 shared_pipeline:

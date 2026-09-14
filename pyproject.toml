@@ -26,6 +26,7 @@ foundry = [
     "azure-ai-evaluation>=1.18",
     "azure-identity>=1.19",
     "openai>=1.101",
+    "tiktoken>=0.11",
 ]
 
 [project.scripts]

@@ -20,10 +20,11 @@ from long_document_indexing.workflows.execution import LocalWorkflowRunner
 
 async def test_model_router_receives_structured_maps_and_returns_decision(tmp_path) -> None:
     generator = _RoutingClient(["doc_order", "doc_complaint"])
+    progress: list[str] = []
     result = await route_documents_from_maps(
         query="What inquiry was skipped across the complaint and order?",
         document_maps=[_map("doc_complaint"), _map("doc_order")],
-        services=_services(tmp_path, generator),
+        services=_services(tmp_path, generator, progress=progress.append),
         top_k=2,
     )
 
@@ -34,6 +35,10 @@ async def test_model_router_receives_structured_maps_and_returns_decision(tmp_pa
     assert generator.request.response_model is StructuredRoutingDecision
     assert generator.request.metadata["document_maps"][0]["entries"][0]["id"] == "entry-1"
     assert "source_references" in generator.request.prompt
+    assert progress == [
+        "routing waiting for model response",
+        "routing selected 2 document(s)",
+    ]
 
 
 async def test_model_router_rejects_unknown_document_id(tmp_path) -> None:
@@ -98,7 +103,7 @@ def _map(document_id: str) -> DocumentMap:
     )
 
 
-def _services(tmp_path: Path, generator) -> Services:
+def _services(tmp_path: Path, generator, *, progress=None) -> Services:
     store = ArtifactStore(tmp_path / "artifacts", "exp")
     return Services(
         artifact_store=store,
@@ -107,4 +112,5 @@ def _services(tmp_path: Path, generator) -> Services:
         usage_ledger=UsageLedger(),
         prompt_loader=PromptLoader(Path("prompts")),
         generator_client=generator,
+        progress=progress,
     )

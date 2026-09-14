@@ -64,6 +64,7 @@ class ModelConfig(BaseModel):
     generator_temperature: float = 0.0
     generator_max_output_tokens: int | None = None
     generator_timeout_seconds: float = 60.0
+    generator_max_retries: int = 12
     generator_response_format: Literal["structured", "json_object", "text"] = "json_object"
     router_deployment: str | None = None
     answer_deployment: str | None = None
@@ -77,6 +78,9 @@ class ModelConfig(BaseModel):
     embedding_timeout_seconds: float = 60.0
     embedding_dimensions: int | None = None
     embedding_batch_size: int = 64
+    embedding_max_input_tokens: int = 8191
+    embedding_max_batch_tokens: int = 250_000
+    embedding_max_retries: int = 12
 
     @field_validator("generator_temperature")
     @classmethod
@@ -99,6 +103,13 @@ class ModelConfig(BaseModel):
             raise ValueError("generator_timeout_seconds must be positive")
         return value
 
+    @field_validator("generator_max_retries")
+    @classmethod
+    def _generator_max_retries_non_negative(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("generator max retries must not be negative")
+        return value
+
     @field_validator("embedding_timeout_seconds")
     @classmethod
     def _embedding_timeout_positive(cls, value: float) -> float:
@@ -106,11 +117,23 @@ class ModelConfig(BaseModel):
             raise ValueError("embedding_timeout_seconds must be positive")
         return value
 
-    @field_validator("embedding_dimensions", "embedding_batch_size")
+    @field_validator(
+        "embedding_dimensions",
+        "embedding_batch_size",
+        "embedding_max_input_tokens",
+        "embedding_max_batch_tokens",
+    )
     @classmethod
     def _embedding_integers_positive(cls, value: int | None) -> int | None:
         if value is not None and value < 1:
             raise ValueError("embedding dimensions and batch size must be positive")
+        return value
+
+    @field_validator("embedding_max_retries")
+    @classmethod
+    def _embedding_max_retries_non_negative(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("embedding max retries must not be negative")
         return value
 
 

@@ -7,6 +7,7 @@ from long_document_indexing.domain.maps import DocumentMap
 from long_document_indexing.domain.runs import RoutingDecision, UsageRecord
 from long_document_indexing.models.base import GenerationRequest
 from long_document_indexing.models.structured_outputs import StructuredRoutingDecision
+from long_document_indexing.progress import await_with_progress
 from long_document_indexing.prompt_safety import (
     apply_prompt_safety_preamble,
     sanitize_for_model_prompt,
@@ -61,19 +62,23 @@ async def route_documents_from_maps(
             },
         )
     )
-    response = await client.generate(
-        GenerationRequest(
-            prompt=prompt,
-            prompt_name="shared/route",
-            metadata={
-                "task": "route_documents",
-                "query": query,
-                "max_documents": top_k,
-                "document_maps": maps_payload,
-                "routing_policy": ROUTING_POLICY_VERSION,
-            },
-            response_model=StructuredRoutingDecision,
-        )
+    response = await await_with_progress(
+        client.generate(
+            GenerationRequest(
+                prompt=prompt,
+                prompt_name="shared/route",
+                metadata={
+                    "task": "route_documents",
+                    "query": query,
+                    "max_documents": top_k,
+                    "document_maps": maps_payload,
+                    "routing_policy": ROUTING_POLICY_VERSION,
+                },
+                response_model=StructuredRoutingDecision,
+            )
+        ),
+        emit=services.progress,
+        message="routing waiting for model response",
     )
     generated = StructuredRoutingDecision.model_validate_json(response.content)
     known_document_ids = {document_map.document_id for document_map in document_maps}
@@ -84,6 +89,8 @@ async def route_documents_from_maps(
     )
     if not selected_document_ids:
         raise ValueError("map router did not select any known document identifiers")
+
+    services.emit_progress(f"routing selected {len(selected_document_ids)} document(s)")
 
     return RoutingResult(
         decision=RoutingDecision(

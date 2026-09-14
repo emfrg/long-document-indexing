@@ -27,10 +27,18 @@ class StuffingSystem(DocumentMapSystemBase):
         usage_records = []
         statuses = {}
 
-        for document in corpus.documents:
+        for document_index, document in enumerate(corpus.documents, start=1):
             source_tokens = document_source_token_count(document)
+            services.emit_progress(
+                "stuffing indexing "
+                f"{corpus.id}: document {document_index}/{len(corpus.documents)} "
+                f"{document.id} ({len(document.segments)} segment(s))"
+            )
             if source_tokens > pipeline.segment_tokens:
                 statuses[document.id] = "context_overflow"
+                services.emit_progress(
+                    f"stuffing skipped {corpus.id}/{document.id}: context overflow"
+                )
                 continue
 
             document_map, usage = await self.generate_document_map(
@@ -43,6 +51,7 @@ class StuffingSystem(DocumentMapSystemBase):
             document_maps.append(document_map)
             usage_records.append(usage)
             statuses[document.id] = "indexed"
+            services.emit_progress(f"stuffing indexed {corpus.id}/{document.id}")
 
         return MapBuildResult(
             document_maps=document_maps,

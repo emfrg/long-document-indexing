@@ -6,6 +6,7 @@ import math
 import time
 from collections import Counter
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
@@ -28,6 +29,9 @@ class OpenAICompatibleEmbeddingClient:
         azure_scope: str = "https://ai.azure.com/.default",
         timeout_seconds: float = 60.0,
         dimensions: int | None = None,
+        max_input_tokens: int = 8191,
+        max_batch_tokens: int = 250_000,
+        max_retries: int = 12,
         client: Any | None = None,
         token_provider: Callable[[], str] | None = None,
     ) -> None:
@@ -39,6 +43,9 @@ class OpenAICompatibleEmbeddingClient:
         self.azure_scope = azure_scope
         self.timeout_seconds = timeout_seconds
         self.dimensions = dimensions
+        self.max_input_tokens = max_input_tokens
+        self.max_batch_tokens = max_batch_tokens
+        self.max_retries = max_retries
         self._client = client
         self._token_provider = token_provider
 
@@ -54,33 +61,66 @@ class OpenAICompatibleEmbeddingClient:
 
     def _embed_sync(self, texts: list[str]) -> EmbeddingResponse:
         started = time.perf_counter()
-        kwargs: dict[str, Any] = {
-            "model": self.deployment,
-            "input": texts,
-            "encoding_format": "float",
-        }
-        if self.dimensions is not None:
-            kwargs["dimensions"] = self.dimensions
+        chunks = _chunk_embedding_inputs(
+            texts,
+            deployment=self.deployment,
+            max_input_tokens=self.max_input_tokens,
+        )
+        chunk_embeddings: list[list[float]] = []
+        input_tokens = 0
+        model_calls = 0
+        response_model: Any = None
+        for batch in _embedding_batches(chunks, max_batch_tokens=self.max_batch_tokens):
+            kwargs: dict[str, Any] = {
+                "model": self.deployment,
+                "input": [chunk.text for chunk in batch],
+                "encoding_format": "float",
+            }
+            if self.dimensions is not None:
+                kwargs["dimensions"] = self.dimensions
 
-        response = self._openai_client().embeddings.create(**kwargs)
+            response = self._openai_client().embeddings.create(**kwargs)
+            data = sorted(
+                _get(response, "data", []),
+                key=lambda item: int(_get(item, "index", 0)),
+            )
+            batch_embeddings = [
+                [float(value) for value in _get(item, "embedding", [])] for item in data
+            ]
+            _validate_embeddings(batch_embeddings, expected_count=len(batch))
+            chunk_embeddings.extend(batch_embeddings)
+            input_tokens += _int_field(
+                _get(response, "usage"),
+                "prompt_tokens",
+                "input_tokens",
+                "total_tokens",
+            )
+            model_calls += 1
+            response_model = _get(response, "model", response_model)
+
         duration_ms = (time.perf_counter() - started) * 1000.0
-        data = sorted(_get(response, "data", []), key=lambda item: int(_get(item, "index", 0)))
-        embeddings = [[float(value) for value in _get(item, "embedding", [])] for item in data]
+        embeddings = _pool_chunk_embeddings(
+            chunks,
+            chunk_embeddings,
+            expected_count=len(texts),
+        )
         _validate_embeddings(embeddings, expected_count=len(texts))
-        usage = _get(response, "usage")
-        input_tokens = _int_field(usage, "prompt_tokens", "input_tokens", "total_tokens")
+        chunk_counts = Counter(chunk.input_index for chunk in chunks)
         return EmbeddingResponse(
             embeddings=embeddings,
             usage=UsageRecord(
                 input_tokens=input_tokens,
-                model_calls=1,
+                model_calls=model_calls,
                 duration_ms=duration_ms,
             ),
             metadata={
                 "client": self.__class__.__name__,
                 "provider": "openai_compatible",
                 "deployment": self.deployment,
-                "model": _get(response, "model"),
+                "model": response_model,
+                "input_count": len(texts),
+                "embedded_chunk_count": len(chunks),
+                "split_input_count": sum(count > 1 for count in chunk_counts.values()),
             },
         )
 
@@ -101,6 +141,7 @@ class OpenAICompatibleEmbeddingClient:
         kwargs: dict[str, Any] = {
             "base_url": self.base_url,
             "timeout": self.timeout_seconds,
+            "max_retries": self.max_retries,
         }
         if self.auth_mode == "api_key":
             kwargs["api_key"] = self._required_api_key()
@@ -139,6 +180,105 @@ class OpenAICompatibleEmbeddingClient:
             self.azure_scope,
         )
         return self._token_provider
+
+
+@dataclass(frozen=True)
+class _EmbeddingChunk:
+    input_index: int
+    text: str
+    token_count: int
+
+
+def _chunk_embedding_inputs(
+    texts: list[str],
+    *,
+    deployment: str,
+    max_input_tokens: int,
+) -> list[_EmbeddingChunk]:
+    if max_input_tokens < 1:
+        raise ValueError("embedding max input tokens must be positive")
+    try:
+        import tiktoken
+    except ImportError as exc:
+        raise RuntimeError(
+            "token-safe Foundry embeddings require the optional `foundry` extra"
+        ) from exc
+
+    try:
+        encoding = tiktoken.encoding_for_model(deployment)
+    except KeyError:
+        encoding = tiktoken.get_encoding("cl100k_base")
+
+    chunks: list[_EmbeddingChunk] = []
+    for input_index, value in enumerate(texts):
+        token_ids = encoding.encode(value, disallowed_special=())
+        if not token_ids:
+            chunks.append(_EmbeddingChunk(input_index=input_index, text=value, token_count=1))
+            continue
+        for start in range(0, len(token_ids), max_input_tokens):
+            chunk_ids = token_ids[start : start + max_input_tokens]
+            chunks.append(
+                _EmbeddingChunk(
+                    input_index=input_index,
+                    text=encoding.decode(chunk_ids),
+                    token_count=len(chunk_ids),
+                )
+            )
+    return chunks
+
+
+def _embedding_batches(
+    chunks: list[_EmbeddingChunk],
+    *,
+    max_batch_tokens: int,
+) -> list[list[_EmbeddingChunk]]:
+    if max_batch_tokens < 1:
+        raise ValueError("embedding max batch tokens must be positive")
+
+    batches: list[list[_EmbeddingChunk]] = []
+    batch: list[_EmbeddingChunk] = []
+    batch_tokens = 0
+    for chunk in chunks:
+        if chunk.token_count > max_batch_tokens:
+            raise ValueError("embedding chunk exceeds the configured batch token limit")
+        if batch and batch_tokens + chunk.token_count > max_batch_tokens:
+            batches.append(batch)
+            batch = []
+            batch_tokens = 0
+        batch.append(chunk)
+        batch_tokens += chunk.token_count
+    if batch:
+        batches.append(batch)
+    return batches
+
+
+def _pool_chunk_embeddings(
+    chunks: list[_EmbeddingChunk],
+    chunk_embeddings: list[list[float]],
+    *,
+    expected_count: int,
+) -> list[list[float]]:
+    _validate_embeddings(chunk_embeddings, expected_count=len(chunks))
+    grouped: list[list[tuple[list[float], int]]] = [[] for _ in range(expected_count)]
+    for chunk, embedding in zip(chunks, chunk_embeddings, strict=True):
+        grouped[chunk.input_index].append((embedding, chunk.token_count))
+
+    pooled: list[list[float]] = []
+    for values in grouped:
+        if not values:
+            raise RuntimeError("embedding chunks did not cover every input")
+        if len(values) == 1:
+            pooled.append(values[0][0])
+            continue
+        total_weight = sum(weight for _, weight in values)
+        dimensions = len(values[0][0])
+        average = [
+            sum(embedding[index] * weight for embedding, weight in values) / total_weight
+            for index in range(dimensions)
+        ]
+        norm = math.sqrt(sum(value * value for value in average))
+        pooled.append([value / norm for value in average] if norm else average)
+    return pooled
 
 
 class FakeEmbeddingClient:

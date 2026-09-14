@@ -8,12 +8,19 @@ from long_document_indexing.retrieval.dense_vector import DenseVectorBackend
 
 async def test_dense_vector_uses_embeddings_and_honors_document_filter(tmp_path) -> None:
     embedding_client = _SemanticEmbeddingClient()
-    backend = DenseVectorBackend(tmp_path, embedding_client, batch_size=8)
+    progress: list[str] = []
+    backend = DenseVectorBackend(
+        tmp_path,
+        embedding_client,
+        batch_size=8,
+        progress=progress.append,
+    )
     index_id = await backend.index(_corpus())
 
     index_usage = backend.consume_usage()
     assert index_usage.model_calls == 1
     assert backend.artifact_path(index_id) is not None
+    assert progress == ["dense_vector embedding corpus: batch 1/1 (2 segment(s))"]
 
     results = await backend.search(
         index_id,
@@ -25,6 +32,7 @@ async def test_dense_vector_uses_embeddings_and_honors_document_filter(tmp_path)
     assert [item.segment_id for item in results] == ["legal_s1", "business_s1"]
     assert all(item.retrieval_stage == "dense_vector" for item in results)
     assert backend.consume_usage().model_calls == 1
+    assert progress[-1] == "dense_vector embedding query"
 
     filtered = await backend.search(
         index_id,
@@ -43,12 +51,14 @@ async def test_dense_vector_reuses_persisted_embeddings(tmp_path) -> None:
     assert first_client.calls == 1
 
     second_client = _SemanticEmbeddingClient()
-    second_backend = DenseVectorBackend(tmp_path, second_client)
+    progress: list[str] = []
+    second_backend = DenseVectorBackend(tmp_path, second_client, progress=progress.append)
     second_id = await second_backend.index(_corpus())
 
     assert second_id == first_id
     assert second_client.calls == 0
     assert second_backend.consume_usage().model_calls == 0
+    assert progress == ["dense_vector reused embeddings corpus (2 segment(s))"]
 
 
 class _SemanticEmbeddingClient:

@@ -3,6 +3,7 @@ from __future__ import annotations
 from long_document_indexing.prompt_safety import (
     apply_prompt_safety_preamble,
     sanitize_for_model_prompt,
+    sanitize_for_model_recovery_prompt,
     sanitize_prompt_payload,
 )
 
@@ -50,3 +51,19 @@ def test_apply_prompt_safety_preamble_marks_neutral_legal_indexing_context() -> 
 
     assert prompt.startswith("Task context: neutral legal-document indexing.")
     assert prompt.endswith("Build a document map.")
+
+
+def test_recovery_prompt_abstracts_sensitive_legal_allegations() -> None:
+    text = (
+        "The complaint alleges sexual harassment, sexual propositions, offensive touching "
+        "involving her breasts and backside, and the remark \"I'm horny.\""
+    )
+
+    sanitized = sanitize_for_model_recovery_prompt(text)
+
+    assert sanitized.startswith("Recovery instruction:")
+    assert "sexual" not in sanitized.lower()
+    assert "breast" not in sanitized.lower()
+    assert "backside" not in sanitized.lower()
+    assert "horny" not in sanitized.lower()
+    assert "workplace harassment based on sex" in sanitized

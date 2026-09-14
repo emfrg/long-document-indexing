@@ -10,6 +10,7 @@ from long_document_indexing.config import (
     AnsweringConfig,
     ExperimentConfig,
     FoundryEvaluationConfig,
+    ModelConfig,
     RunControlConfig,
     SystemConfig,
     WorkflowConfig,
@@ -116,6 +117,17 @@ def test_system_config_rejects_invalid_advanced_knobs() -> None:
 
     with pytest.raises(ValidationError, match="greater than 0"):
         SystemConfig.model_validate({"id": "agentic_map", "agent_target_coverage": 0})
+
+
+def test_model_config_rejects_invalid_embedding_limits() -> None:
+    with pytest.raises(ValidationError, match="must be positive"):
+        ModelConfig.model_validate({"embedding_max_input_tokens": 0})
+
+    with pytest.raises(ValidationError, match="must not be negative"):
+        ModelConfig.model_validate({"embedding_max_retries": -1})
+
+    with pytest.raises(ValidationError, match="must not be negative"):
+        ModelConfig.model_validate({"generator_max_retries": -1})
 
 
 def test_answering_config_rejects_unknown_mode() -> None:

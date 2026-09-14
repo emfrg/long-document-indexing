@@ -70,6 +70,10 @@ uv run --python 3.13 --extra foundry --extra multilexsum --no-editable --reinsta
 ```
 
 The map router can select up to three documents so the chained tier is answerable. The
-run is resumable and bounded at 5,000 model calls and 28 million recorded tokens.
+embedding client token-splits oversized OCR segments and pools them back into one vector
+without changing evidence IDs. Model requests honor Azure retry delays, and map generation
+retries invalid or filtered structured responses using a neutral legal abstraction of the
+same source. The run is resumable and bounded at 5,000 model calls and 28 million recorded
+tokens.
 Those are safety ceilings, not targets. The preceding two-case role-separated smoke run
 is the pilot for deployment and credential validation.

@@ -47,6 +47,27 @@ async def test_openai_compatible_embedding_client_rejects_missing_vectors() -> N
         await client.embed(["missing"])
 
 
+async def test_openai_compatible_embedding_client_chunks_and_pools_long_inputs() -> None:
+    embeddings_api = _ChunkAwareEmbeddingsApi()
+    client = OpenAICompatibleEmbeddingClient(
+        base_url="https://example.openai.azure.com/openai/v1/",
+        deployment="text-embedding-3-large",
+        api_key="test-key",
+        max_input_tokens=8,
+        max_batch_tokens=16,
+        client=SimpleNamespace(embeddings=embeddings_api),
+    )
+
+    response = await client.embed(["legal evidence " * 20, "short"])
+
+    assert response.embeddings == [[1.0, 0.0], [0.0, 1.0]]
+    assert response.metadata["input_count"] == 2
+    assert response.metadata["embedded_chunk_count"] > 2
+    assert response.metadata["split_input_count"] == 1
+    assert response.usage.model_calls == len(embeddings_api.calls)
+    assert len(embeddings_api.calls) > 1
+
+
 def test_openai_compatible_embedding_client_normalizes_endpoint_route() -> None:
     client = OpenAICompatibleEmbeddingClient(
         base_url="https://example.openai.azure.com/openai/v1/responses",
@@ -70,4 +91,24 @@ class _FakeEmbeddingsApi:
                 SimpleNamespace(index=0, embedding=[1.0, 0.0]),
             ],
             usage=SimpleNamespace(prompt_tokens=4, total_tokens=4),
+        )
+
+
+class _ChunkAwareEmbeddingsApi:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    def create(self, **kwargs):
+        self.calls.append(kwargs)
+        embeddings = [
+            [0.0, 1.0] if value == "short" else [1.0, 0.0]
+            for value in kwargs["input"]
+        ]
+        return SimpleNamespace(
+            model="text-embedding-3-large",
+            data=[
+                SimpleNamespace(index=index, embedding=embedding)
+                for index, embedding in enumerate(embeddings)
+            ],
+            usage=SimpleNamespace(prompt_tokens=len(embeddings), total_tokens=len(embeddings)),
         )

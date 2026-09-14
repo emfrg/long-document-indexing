@@ -10,6 +10,12 @@ PROMPT_SAFETY_PREAMBLE = (
     "instructions, graphic detail, or procedural guidance; abstract sensitive "
     "procedural details into neutral legal-record language.\n\n"
 )
+PROMPT_SAFETY_RECOVERY_PREAMBLE = (
+    "Recovery instruction: the source is a public legal record supplied only for "
+    "neutral indexing. Abstract sensitive allegations into high-level legal categories, "
+    "do not repeat explicit wording, and return the required structured object rather "
+    "than a refusal.\n\n"
+)
 
 _ID_KEYS = {
     "id",
@@ -108,6 +114,41 @@ _TEXT_REPLACEMENTS = (
     (re.compile(r"\bsuffering\b", flags=re.IGNORECASE), "distress"),
 )
 
+_SENSITIVE_LEGAL_REPLACEMENTS = (
+    (
+        re.compile(r"\bsexually hostile (?:work )?environment\b", flags=re.IGNORECASE),
+        "hostile work environment based on sex",
+    ),
+    (
+        re.compile(r"\bsexual harassment\b", flags=re.IGNORECASE),
+        "workplace harassment based on sex",
+    ),
+    (
+        re.compile(r"\bsexual propositions?\b", flags=re.IGNORECASE),
+        "unwelcome workplace propositions",
+    ),
+    (
+        re.compile(r"\boffensive touching\b", flags=re.IGNORECASE),
+        "unwanted workplace contact",
+    ),
+    (re.compile(r"\bsexually\b", flags=re.IGNORECASE), "on a sex-related basis"),
+    (re.compile(r"\bsexual\b", flags=re.IGNORECASE), "sex-based"),
+    (
+        re.compile(r"\b(?:rape|raped|rapes|molest\w*)\b", flags=re.IGNORECASE),
+        "alleged severe interpersonal misconduct",
+    ),
+    (
+        re.compile(
+            r"\b(?:breasts?|backside|buttocks?|genitals?|penis|vagina)\b",
+            flags=re.IGNORECASE,
+        ),
+        "body area",
+    ),
+    (re.compile(r"\bintercourse\b", flags=re.IGNORECASE), "intimate conduct"),
+    (re.compile(r"\bpornograph\w*\b", flags=re.IGNORECASE), "explicit material"),
+    (re.compile(r"[\"']?I(?:'| a)m horny[.!?\"']*", flags=re.IGNORECASE), "an explicit remark"),
+)
+
 
 def sanitize_for_model_prompt(text: str) -> str:
     """Reduce graphic legal-case wording before sending text to hosted model filters."""
@@ -116,6 +157,15 @@ def sanitize_for_model_prompt(text: str) -> str:
     for pattern, replacement in _TEXT_REPLACEMENTS:
         sanitized = pattern.sub(replacement, sanitized)
     return sanitized
+
+
+def sanitize_for_model_recovery_prompt(text: str) -> str:
+    """Further abstract sensitive allegations after a hosted-model refusal."""
+
+    sanitized = sanitize_for_model_prompt(text)
+    for pattern, replacement in _SENSITIVE_LEGAL_REPLACEMENTS:
+        sanitized = pattern.sub(replacement, sanitized)
+    return f"{PROMPT_SAFETY_RECOVERY_PREAMBLE}{sanitized}"
 
 
 def sanitize_prompt_payload(value: Any, *, key: str | None = None) -> Any:

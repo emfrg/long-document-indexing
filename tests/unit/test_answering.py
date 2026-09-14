@@ -36,10 +36,12 @@ async def test_extractive_answer_uses_retrieved_items_without_model_call(tmp_pat
 
 
 async def test_generated_answer_uses_structured_model_and_validates_citations(tmp_path) -> None:
+    progress: list[str] = []
     services = _services(
         tmp_path,
         answering_mode="generated",
         generator_client=FakeTextGenerationClient(),
+        progress=progress.append,
     )
 
     result = await answer_from_retrieved_evidence(
@@ -55,6 +57,7 @@ async def test_generated_answer_uses_structured_model_and_validates_citations(tm
         "alpha_s2",
     ]
     assert result.usage.model_calls == 1
+    assert progress == ["answering waiting for model response"]
 
 
 async def test_generated_answer_rejects_citations_outside_retrieved_evidence(tmp_path) -> None:
@@ -141,6 +144,7 @@ def _services(
     *,
     answering_mode: str,
     generator_client=None,
+    progress=None,
 ) -> Services:
     store = ArtifactStore(tmp_path / "artifacts", "exp")
     return Services(
@@ -151,6 +155,7 @@ def _services(
         prompt_loader=PromptLoader(Path("prompts")),
         answering_mode=answering_mode,
         generator_client=generator_client,
+        progress=progress,
     )
 
 
