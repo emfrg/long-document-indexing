@@ -54,6 +54,34 @@ def test_budget_ledger_can_start_from_existing_usage_events() -> None:
     assert ledger.exhausted_reason("next call") is None
 
 
+def test_budget_preflight_rejects_phase_that_is_estimated_to_exceed_cap() -> None:
+    ledger = BudgetLedger(
+        RunControlConfig(max_model_calls=10, max_total_tokens=1_000),
+        initial_events=[
+            UsageEvent(
+                experiment_id="exp",
+                run_id="run-1",
+                system_id="stuffing",
+                corpus_id="corpus",
+                stage="query_system",
+                kind="system",
+                model_calls=6,
+                input_tokens=500,
+                output_tokens=100,
+            )
+        ],
+    )
+
+    with pytest.raises(BudgetExceeded, match="No new work was started"):
+        ledger.require_estimated_capacity(
+            "query phase",
+            UsageRecord(model_calls=3, input_tokens=350, output_tokens=100),
+        )
+
+    assert ledger.snapshot.model_calls == 6
+    assert ledger.snapshot.total_tokens == 600
+
+
 def test_describe_budget_reports_current_usage_and_limits() -> None:
     lines = describe_budget(
         RunControlConfig(max_model_calls=5),

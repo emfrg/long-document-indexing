@@ -312,6 +312,12 @@ uv run --python 3.13 --extra foundry --extra multilexsum --no-editable --reinsta
 uv run --python 3.13 --extra foundry --extra multilexsum --no-editable --reinstall-package long-document-indexing ldi run --config configs/experiments/foundry-multilexsum-legal-rag-qa-role-separated-extended.yaml
 ```
 
+Always inspect the dry-run output before the paid command. It reports reusable, stale,
+failed, and missing index/query units plus a guarded estimate for remaining query usage.
+Normal resume retries failed or missing work, but fails before replacing a stale index or
+previously successful query. `--allow-stale-recompute` is the explicit, paid override
+when that replacement is intentional.
+
 Long runs report the current system, case, document, and question; checkpoint and
 artifact reuse; routing, embedding, map-building, and answering calls; and a heartbeat
 every 60 seconds while waiting for a remote model response. These messages are
@@ -376,17 +382,31 @@ run_control:
   max_total_tokens: 50000
 ```
 
-`resume: true` reuses valid index artifacts and successful query records. Failed or skipped query records are retried. `max_model_calls`, `max_input_tokens`, `max_output_tokens`, `max_total_tokens`, and `max_estimated_cost` are enforced against recorded usage.
+`resume: true` reuses valid index artifacts and successful query records. Failed or
+skipped query records are retried. Existing work with a stale signature is never replaced
+implicitly. `max_model_calls`, `max_input_tokens`, `max_output_tokens`,
+`max_total_tokens`, and `max_estimated_cost` are enforced against recorded usage. When
+prior successful rows provide an estimate, the runner reserves a 1.25x margin and stops
+before starting a phase that is unlikely to fit the remaining budget.
 
 CLI flags can override the config for one command:
 
 ```bash
 uv run --python 3.13 --no-editable --reinstall-package long-document-indexing ldi run --config configs/experiments/enterprise-thin-slice.yaml --resume
 uv run --python 3.13 --no-editable --reinstall-package long-document-indexing ldi run --config configs/experiments/enterprise-thin-slice.yaml --force
+uv run --python 3.13 --no-editable --reinstall-package long-document-indexing ldi run --config configs/experiments/enterprise-thin-slice.yaml --resume --allow-stale-recompute
 uv run --python 3.13 --no-editable --reinstall-package long-document-indexing ldi run --config configs/experiments/enterprise-thin-slice.yaml --dry-run-budget
 ```
 
-The runner writes index artifacts, run records, and usage ledgers incrementally. If a budget is exceeded after a completed unit, the completed artifact remains on disk and the next run can resume from that point.
+`--force` intentionally rebuilds everything. `--allow-stale-recompute` is narrower: it
+permits resume to replace only existing units whose provenance no longer matches.
+
+The runner writes index artifacts, run records, checkpoints, and usage ledgers
+incrementally using atomic file replacement. Budget exhaustion stops without overwriting
+pending records. A query phase containing any failed, skipped, missing, or empty result
+returns a nonzero exit and cannot be exported to Foundry. Foundry commands regenerate and
+validate the local export before making remote calls, preventing stale datasets from being
+published.
 
 ## Reporting
 

@@ -5,7 +5,9 @@ from pathlib import Path
 
 import pytest
 
+import long_document_indexing.cli as cli_module
 from long_document_indexing.cli import (
+    _export_foundry_eval,
     _index,
     _is_reusable_index_artifact,
     _is_reusable_query_record,
@@ -23,7 +25,12 @@ from long_document_indexing.domain.maps import (
 )
 from long_document_indexing.domain.runs import RagRunRecord
 from long_document_indexing.prompt_safety import PROMPT_SAFETY_POLICY_VERSION
-from long_document_indexing.run_control import BudgetExceeded, BudgetLedger
+from long_document_indexing.run_control import (
+    BenchmarkIncompleteError,
+    BudgetExceeded,
+    BudgetLedger,
+    UnsafeResumeError,
+)
 from long_document_indexing.storage.artifacts import ArtifactStore
 from long_document_indexing.storage.maps import (
     DOCUMENT_MAP_CONTENT_SIGNATURE_POLICY_VERSION,
@@ -176,7 +183,10 @@ def test_index_discovery_recovers_individual_artifact_without_manifest(tmp_path)
     assert _load_index_artifacts_if_present(store) == [artifact]
 
 
-def test_interrupted_resume_preserves_not_yet_rebuilt_artifacts(tmp_path) -> None:
+def test_interrupted_resume_preserves_not_yet_rebuilt_artifacts(
+    tmp_path,
+    monkeypatch,
+) -> None:
     config = _foundry_export_smoke_config(tmp_path).model_copy(
         update={"systems": ["stuffing", "map_reduce"]}
     )
@@ -197,13 +207,66 @@ def test_interrupted_resume_preserves_not_yet_rebuilt_artifacts(tmp_path) -> Non
         )
         store.write_json(Path(stale.artifact_path).relative_to(store.experiment_dir), stale)
 
-    resume = config.model_copy(update={"run_control": RunControlConfig(resume=True)})
+    resume = config.model_copy(
+        update={
+            "run_control": RunControlConfig(
+                resume=True,
+                allow_stale_recompute=True,
+            )
+        }
+    )
+    monkeypatch.setattr(cli_module, "_estimate_pending_index_usage", lambda *_: None)
     budget = BudgetLedger(RunControlConfig(max_model_calls=1))
     with pytest.raises(BudgetExceeded, match="Budget exceeded after index stuffing"):
         asyncio.run(_index(resume, budget=budget))
 
     recovered = _load_index_artifacts_if_present(store)
     assert {artifact.system_id for artifact in recovered} == {"stuffing", "map_reduce"}
+
+
+def test_resume_refuses_to_replace_stale_indexes_without_explicit_permission(
+    tmp_path,
+) -> None:
+    config = _foundry_export_smoke_config(tmp_path)
+    _prepare(config)
+    asyncio.run(_index(config))
+    store = ArtifactStore(config.storage.artifacts_dir, config.experiment.id)
+    artifact = _load_index_artifacts_if_present(store)[0]
+    stale = artifact.model_copy(
+        update={
+            "build_metadata": {
+                **artifact.build_metadata,
+                "index_config_signature": "stale-index-config",
+            }
+        }
+    )
+    store.write_json(Path(stale.artifact_path).relative_to(store.experiment_dir), stale)
+
+    resume = config.model_copy(update={"run_control": RunControlConfig(resume=True)})
+    with pytest.raises(UnsafeResumeError, match="Refusing to replace 1 stale index"):
+        asyncio.run(_index(resume))
+
+
+def test_resume_refuses_to_replace_stale_successful_queries(tmp_path) -> None:
+    config = _foundry_export_smoke_config(tmp_path)
+    _prepare(config)
+    asyncio.run(_index(config))
+    asyncio.run(_query(config))
+
+    experiment_dir = config.storage.artifacts_dir / config.experiment.id
+    records = _run_records(experiment_dir / "runs/stuffing.jsonl")
+    records[0] = records[0].model_copy(update={"query_config_signature": "stale"})
+    ArtifactStore(config.storage.artifacts_dir, config.experiment.id).write_jsonl(
+        "runs/stuffing.jsonl",
+        records,
+    )
+    before = (experiment_dir / "runs/stuffing.jsonl").read_text(encoding="utf-8")
+    resume = config.model_copy(update={"run_control": RunControlConfig(resume=True)})
+
+    with pytest.raises(UnsafeResumeError, match="Refusing to replace 1 stale successful"):
+        asyncio.run(_query(resume))
+
+    assert (experiment_dir / "runs/stuffing.jsonl").read_text(encoding="utf-8") == before
 
 
 def test_query_records_are_reusable_only_for_matching_index_signature(tmp_path) -> None:
@@ -268,28 +331,101 @@ def test_query_records_are_reusable_only_for_matching_index_signature(tmp_path) 
     )
 
 
-def test_exhausted_query_budget_writes_skipped_records(tmp_path) -> None:
+def test_exhausted_query_budget_stops_without_writing_records(tmp_path) -> None:
     config = _foundry_export_smoke_config(tmp_path)
     budget_config = config.model_copy(update={"run_control": RunControlConfig(max_model_calls=0)})
 
     _prepare(config)
     asyncio.run(_index(config))
-    asyncio.run(_query(budget_config))
+    with pytest.raises(BudgetExceeded, match="Budget exhausted before query stuffing"):
+        asyncio.run(_query(budget_config))
 
     experiment_dir = tmp_path / "artifacts" / "foundry-eval-export-smoke"
-    records = _run_records(experiment_dir / "runs/stuffing.jsonl")
-    query_usage = [
-        UsageEvent.model_validate_json(line)
-        for line in (experiment_dir / "costs/query-usage.jsonl")
-        .read_text(encoding="utf-8")
-        .splitlines()
-        if line.strip()
-    ]
+    run_path = experiment_dir / "runs/stuffing.jsonl"
+    query_usage_path = experiment_dir / "costs/query-usage.jsonl"
 
+    assert not run_path.exists()
+    assert not query_usage_path.exists()
+
+
+def test_foundry_export_refuses_incomplete_query_records(tmp_path) -> None:
+    config = _foundry_export_smoke_config(tmp_path)
+    _prepare(config)
+    asyncio.run(_index(config))
+    asyncio.run(_query(config))
+    experiment_dir = config.storage.artifacts_dir / config.experiment.id
+    records = _run_records(experiment_dir / "runs/stuffing.jsonl")
+    records[0] = records[0].model_copy(
+        update={"status": "failed", "answer": "", "retrieved_items": []}
+    )
+
+    with pytest.raises(BenchmarkIncompleteError, match="Refusing to export"):
+        _export_foundry_eval(
+            config,
+            store=ArtifactStore(config.storage.artifacts_dir, config.experiment.id),
+            records=records,
+        )
+
+
+def test_foundry_export_refuses_stale_successful_query_records(tmp_path) -> None:
+    config = _foundry_export_smoke_config(tmp_path)
+    _prepare(config)
+    asyncio.run(_index(config))
+    asyncio.run(_query(config))
+    experiment_dir = config.storage.artifacts_dir / config.experiment.id
+    records = _run_records(experiment_dir / "runs/stuffing.jsonl")
+    records[0] = records[0].model_copy(update={"query_config_signature": "stale"})
+
+    with pytest.raises(BenchmarkIncompleteError, match="stale=1"):
+        _export_foundry_eval(
+            config,
+            store=ArtifactStore(config.storage.artifacts_dir, config.experiment.id),
+            records=records,
+        )
+
+
+def test_query_phase_reports_failure_after_checkpointing_all_rows(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    config = _foundry_export_smoke_config(tmp_path)
+    _prepare(config)
+    asyncio.run(_index(config))
+
+    async def failed_query_workflow(**kwargs):
+        system = kwargs["system"]
+        item = kwargs["item"]
+        artifact = kwargs["index_artifact"]
+        return RagRunRecord(
+            run_id=cli_module.stable_query_run_id(
+                kwargs["experiment_id"],
+                system.id,
+                item.id,
+                kwargs["repetition"],
+            ),
+            experiment_id=kwargs["experiment_id"],
+            system_id=system.id,
+            corpus_id=item.corpus_id,
+            item_id=item.id,
+            selected_document_ids=[],
+            retrieved_items=[],
+            answer="",
+            citations=[],
+            status="failed",
+            error="simulated model failure",
+            index_artifact_id=artifact.id,
+        )
+
+    monkeypatch.setattr(cli_module, "run_query_workflow", failed_query_workflow)
+
+    with pytest.raises(BenchmarkIncompleteError, match="2 failed/skipped"):
+        asyncio.run(_query(config))
+
+    records = _run_records(
+        config.storage.artifacts_dir / config.experiment.id / "runs/stuffing.jsonl"
+    )
     assert len(records) == 2
-    assert {record.status for record in records} == {"skipped"}
-    assert all("Budget exhausted before query stuffing" in str(record.error) for record in records)
-    assert query_usage == []
+    assert {record.status for record in records} == {"failed"}
 
 
 def test_index_budget_persists_completed_artifact_before_raising(tmp_path) -> None:

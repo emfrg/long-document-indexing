@@ -9,6 +9,7 @@ from typing import Any
 
 from long_document_indexing.domain.corpus import Corpus
 from long_document_indexing.domain.runs import RetrievedItem, UsageRecord
+from long_document_indexing.storage.artifacts import atomic_write_text
 from long_document_indexing.text import tokenize
 
 
@@ -56,7 +57,7 @@ class LocalVectorBackend:
             record["norm"] = _norm(weights)
 
         payload = {"id": index_id, "corpus_id": corpus.id, "idf": idf, "records": records}
-        path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        atomic_write_text(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
         self._indexes[index_id] = payload
         return index_id
 

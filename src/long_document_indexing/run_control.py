@@ -24,6 +24,14 @@ class BudgetExceeded(RuntimeError):
     """Raised when a run-control budget is exhausted or exceeded."""
 
 
+class UnsafeResumeError(RuntimeError):
+    """Raised before resume would silently replace stale completed work."""
+
+
+class BenchmarkIncompleteError(RuntimeError):
+    """Raised after persisted query records still contain failures."""
+
+
 class BudgetLedger:
     """Tracks cumulative usage against configured run-control budgets."""
 
@@ -105,6 +113,33 @@ class BudgetLedger:
         reason = self.exhausted_reason(label)
         if reason is not None:
             raise BudgetExceeded(reason)
+
+    def require_estimated_capacity(self, label: str, usage: UsageRecord) -> None:
+        """Fail before a phase when observed usage predicts that it cannot finish."""
+
+        projected_input = self._input_tokens + usage.input_tokens
+        projected_output = self._output_tokens + usage.output_tokens
+        projected_calls = self._model_calls + usage.model_calls
+        projected_cost = self._estimated_cost
+        if usage.estimated_cost is not None:
+            projected_cost = (projected_cost or 0.0) + usage.estimated_cost
+        checks = (
+            ("model_calls", projected_calls, self.control.max_model_calls),
+            ("input_tokens", projected_input, self.control.max_input_tokens),
+            ("output_tokens", projected_output, self.control.max_output_tokens),
+            (
+                "total_tokens",
+                projected_input + projected_output,
+                self.control.max_total_tokens,
+            ),
+            ("estimated_cost", projected_cost, self.control.max_estimated_cost),
+        )
+        for name, projected, limit in checks:
+            if limit is not None and projected is not None and projected > limit:
+                raise BudgetExceeded(
+                    f"Estimated budget insufficient before {label}: projected_{name}="
+                    f"{projected} > max_{name}={limit}. No new work was started."
+                )
 
     def require_not_exceeded(self, label: str) -> None:
         snapshot = self.snapshot

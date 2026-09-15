@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import asyncio
 import csv
+import io
 import json
 import time
-from collections.abc import Coroutine
+from collections import Counter
+from collections.abc import Callable, Coroutine
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -48,12 +51,14 @@ from long_document_indexing.retrieval.dense_vector import DenseVectorBackend
 from long_document_indexing.retrieval.local_vector import LocalVectorBackend
 from long_document_indexing.routing import ROUTING_POLICY_VERSION
 from long_document_indexing.run_control import (
+    BenchmarkIncompleteError,
     BudgetExceeded,
     BudgetLedger,
+    UnsafeResumeError,
     describe_budget,
 )
 from long_document_indexing.services import Services
-from long_document_indexing.storage.artifacts import ArtifactStore
+from long_document_indexing.storage.artifacts import ArtifactStore, atomic_write_text
 from long_document_indexing.storage.maps import (
     DOCUMENT_MAP_CONTENT_SIGNATURE_POLICY_VERSION,
     document_map_content_signature,
@@ -75,6 +80,7 @@ from long_document_indexing.workflows.common_query import (
 from long_document_indexing.workflows.execution import LocalWorkflowRunner, MafWorkflowRunner
 
 app = typer.Typer(no_args_is_help=True)
+BUDGET_ESTIMATE_SAFETY_FACTOR = 1.25
 ConfigPath = Annotated[Path, typer.Option("--config", "-c")]
 ResumeFlag = Annotated[
     bool,
@@ -83,6 +89,13 @@ ResumeFlag = Annotated[
 ForceFlag = Annotated[
     bool,
     typer.Option("--force", help="Ignore reusable artifacts and rebuild or requery work."),
+]
+AllowStaleRecomputeFlag = Annotated[
+    bool,
+    typer.Option(
+        "--allow-stale-recompute",
+        help="Explicitly replace existing artifacts or successful runs with stale signatures.",
+    ),
 ]
 DryRunBudgetFlag = Annotated[
     bool,
@@ -101,6 +114,26 @@ RunNameOption = Annotated[
     typer.Option("--run-name", help="Foundry Evals run name to create."),
 ]
 
+
+@dataclass(frozen=True)
+class IndexResumePlan:
+    planned_keys: frozenset[tuple[str, str]]
+    reusable_keys: frozenset[tuple[str, str]]
+    stale_keys: frozenset[tuple[str, str]]
+    missing_keys: frozenset[tuple[str, str]]
+
+
+@dataclass(frozen=True)
+class QueryResumePlan:
+    planned_count: int
+    reusable_run_ids: frozenset[str]
+    stale_succeeded_run_ids: frozenset[str]
+    retry_run_ids: frozenset[str]
+    missing_run_ids: frozenset[str]
+    pending_system_ids: tuple[str, ...]
+    stale_succeeded_system_ids: tuple[str, ...]
+
+
 @app.command()
 def prepare(config: ConfigPath) -> None:
     """Validate config and dataset, then write an experiment manifest."""
@@ -113,12 +146,18 @@ def index(
     config: ConfigPath,
     resume: ResumeFlag = False,
     force: ForceFlag = False,
+    allow_stale_recompute: AllowStaleRecomputeFlag = False,
     dry_run_budget: DryRunBudgetFlag = False,
 ) -> None:
     """Build index artifacts for all configured systems and corpora."""
 
     experiment_config = load_experiment_config(config)
-    run_control = _effective_run_control(experiment_config, resume=resume, force=force)
+    run_control = _effective_run_control(
+        experiment_config,
+        resume=resume,
+        force=force,
+        allow_stale_recompute=allow_stale_recompute,
+    )
     experiment_config = experiment_config.model_copy(update={"run_control": run_control})
     if dry_run_budget:
         _dry_run_budget(experiment_config, run_control)
@@ -131,12 +170,18 @@ def query(
     config: ConfigPath,
     resume: ResumeFlag = False,
     force: ForceFlag = False,
+    allow_stale_recompute: AllowStaleRecomputeFlag = False,
     dry_run_budget: DryRunBudgetFlag = False,
 ) -> None:
     """Run benchmark questions through existing index artifacts."""
 
     experiment_config = load_experiment_config(config)
-    run_control = _effective_run_control(experiment_config, resume=resume, force=force)
+    run_control = _effective_run_control(
+        experiment_config,
+        resume=resume,
+        force=force,
+        allow_stale_recompute=allow_stale_recompute,
+    )
     experiment_config = experiment_config.model_copy(update={"run_control": run_control})
     if dry_run_budget:
         _dry_run_budget(experiment_config, run_control)
@@ -148,21 +193,23 @@ def query(
 def evaluate(config: ConfigPath) -> None:
     """Calculate deterministic local metrics from run records."""
 
-    _evaluate(load_experiment_config(config))
+    _run_sync_with_handling(lambda: _evaluate(load_experiment_config(config)))
 
 
 @app.command("export-foundry-eval")
 def export_foundry_eval(config: ConfigPath) -> None:
     """Export run records as a Foundry-ready JSONL evaluation dataset."""
 
-    _export_foundry_eval(load_experiment_config(config))
+    _run_sync_with_handling(lambda: _export_foundry_eval(load_experiment_config(config)))
 
 
 @app.command("evaluate-foundry-managed")
 def evaluate_foundry_managed(config: ConfigPath, dry_run: DryRunFlag = False) -> None:
     """Run Azure AI Evaluation SDK over the exported Foundry dataset."""
 
-    _evaluate_foundry_managed(load_experiment_config(config), dry_run=dry_run)
+    _run_sync_with_handling(
+        lambda: _evaluate_foundry_managed(load_experiment_config(config), dry_run=dry_run)
+    )
 
 
 @app.command("publish-foundry-evals")
@@ -174,11 +221,13 @@ def publish_foundry_evals(
 ) -> None:
     """Create portal-visible Foundry Evals runs, one per benchmark system."""
 
-    _publish_foundry_evals(
-        load_experiment_config(config),
-        dry_run=dry_run,
-        evaluation_name=evaluation_name,
-        run_name=run_name,
+    _run_sync_with_handling(
+        lambda: _publish_foundry_evals(
+            load_experiment_config(config),
+            dry_run=dry_run,
+            evaluation_name=evaluation_name,
+            run_name=run_name,
+        )
     )
 
 
@@ -186,7 +235,7 @@ def publish_foundry_evals(
 def report(config: ConfigPath) -> None:
     """Aggregate local metrics into CSV and Markdown summaries."""
 
-    _report(load_experiment_config(config))
+    _run_sync_with_handling(lambda: _report(load_experiment_config(config)))
 
 
 @app.command()
@@ -194,12 +243,18 @@ def run(
     config: ConfigPath,
     resume: ResumeFlag = False,
     force: ForceFlag = False,
+    allow_stale_recompute: AllowStaleRecomputeFlag = False,
     dry_run_budget: DryRunBudgetFlag = False,
 ) -> None:
     """Execute prepare, index, query, evaluate, and report."""
 
     experiment_config = load_experiment_config(config)
-    run_control = _effective_run_control(experiment_config, resume=resume, force=force)
+    run_control = _effective_run_control(
+        experiment_config,
+        resume=resume,
+        force=force,
+        allow_stale_recompute=allow_stale_recompute,
+    )
     experiment_config = experiment_config.model_copy(update={"run_control": run_control})
     if dry_run_budget:
         _dry_run_budget(experiment_config, run_control)
@@ -234,6 +289,23 @@ def _run_with_budget_handling(coro: Coroutine[Any, Any, None]) -> None:
     except BudgetExceeded as exc:
         typer.echo(str(exc), err=True)
         raise typer.Exit(code=2) from exc
+    except UnsafeResumeError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=3) from exc
+    except BenchmarkIncompleteError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=4) from exc
+
+
+def _run_sync_with_handling(operation: Callable[[], None]) -> None:
+    try:
+        operation()
+    except UnsafeResumeError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=3) from exc
+    except BenchmarkIncompleteError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=4) from exc
 
 
 def _effective_run_control(
@@ -241,6 +313,7 @@ def _effective_run_control(
     *,
     resume: bool,
     force: bool,
+    allow_stale_recompute: bool,
 ) -> RunControlConfig:
     if resume and force:
         raise typer.BadParameter("--resume and --force cannot be used together")
@@ -252,6 +325,8 @@ def _effective_run_control(
     if force:
         payload["resume"] = False
         payload["force"] = True
+    if allow_stale_recompute:
+        payload["allow_stale_recompute"] = True
     return RunControlConfig.model_validate(payload)
 
 
@@ -264,47 +339,252 @@ def _dry_run_budget(config: ExperimentConfig, run_control: RunControlConfig) -> 
     initial_events = [*existing_index_events, *existing_query_events] if run_control.resume else []
     budget = BudgetLedger(run_control, initial_events=initial_events)
     existing_artifacts = _load_index_artifacts_from_dir(experiment_dir)
+    index_plan = _build_index_resume_plan(config, loaded, services, existing_artifacts)
     reusable_artifacts = [
         artifact
         for artifact in existing_artifacts
-        if _is_reusable_index_artifact(
+        if _index_artifact_key(artifact) in index_plan.reusable_keys
+    ]
+    existing_runs = _load_run_records_from_dir(experiment_dir, config)
+    successful_runs = [record for record in existing_runs if record.status == "succeeded"]
+    query_plan = _build_query_resume_plan(
+        config,
+        loaded,
+        reusable_artifacts,
+        existing_runs,
+        expected_query_config_signature=services.query_config_signature,
+    )
+
+    typer.echo(f"Experiment: {config.experiment.id}")
+    typer.echo(
+        f"Run control: resume={run_control.resume}, force={run_control.force}, "
+        f"allow_stale_recompute={run_control.allow_stale_recompute}"
+    )
+    typer.echo(
+        "Planned units: "
+        f"index={len(index_plan.planned_keys)}, query={query_plan.planned_count}, "
+        f"existing_indexes={len(existing_artifacts)}, "
+        f"reusable_indexes={len(index_plan.reusable_keys)}, "
+        f"existing_successful_queries={len(successful_runs)}, "
+        f"reusable_queries={len(query_plan.reusable_run_ids)}"
+    )
+    typer.echo(
+        "Index work: "
+        f"reusable={len(index_plan.reusable_keys)}, "
+        f"stale={len(index_plan.stale_keys)}, missing={len(index_plan.missing_keys)}"
+    )
+    typer.echo(
+        "Query work: "
+        f"reusable={len(query_plan.reusable_run_ids)}, "
+        f"stale_succeeded={len(query_plan.stale_succeeded_run_ids)}, "
+        f"retry_failed_or_skipped={len(query_plan.retry_run_ids)}, "
+        f"missing={len(query_plan.missing_run_ids)}"
+    )
+    index_estimate = _estimate_pending_index_usage(
+        existing_artifacts,
+        index_plan.stale_keys | index_plan.missing_keys,
+    )
+    if index_estimate is not None:
+        typer.echo(
+            "Estimated additional index usage from prior artifact averages: "
+            f"model_calls={index_estimate.model_calls}, "
+            f"total_tokens={index_estimate.input_tokens + index_estimate.output_tokens}"
+        )
+    estimate = _estimate_pending_query_usage(existing_runs, query_plan.pending_system_ids)
+    if estimate is not None:
+        guarded_estimate = _scale_usage(estimate, BUDGET_ESTIMATE_SAFETY_FACTOR)
+        typer.echo(
+            "Estimated additional query usage from prior successful averages: "
+            f"model_calls={estimate.model_calls}, input_tokens={estimate.input_tokens}, "
+            f"output_tokens={estimate.output_tokens}, "
+            f"total_tokens={estimate.input_tokens + estimate.output_tokens}"
+        )
+        typer.echo(
+            f"Budget preflight reserve ({BUDGET_ESTIMATE_SAFETY_FACTOR:g}x): "
+            f"model_calls={guarded_estimate.model_calls}, "
+            f"total_tokens={guarded_estimate.input_tokens + guarded_estimate.output_tokens}"
+        )
+    if index_plan.stale_keys or query_plan.stale_succeeded_run_ids:
+        typer.echo(
+            "Safety: execution will stop before replacing stale completed work unless "
+            "--allow-stale-recompute is explicitly supplied."
+        )
+    for line in describe_budget(run_control, budget.snapshot):
+        typer.echo(line)
+
+
+def _build_index_resume_plan(
+    config: ExperimentConfig,
+    loaded: LoadedDataset,
+    services: Services,
+    existing_artifacts: list[IndexArtifact],
+) -> IndexResumePlan:
+    planned_keys = frozenset(
+        (config.system_config_for(system_id).id, corpus.id)
+        for system_id in config.systems
+        for corpus in loaded.corpora
+    )
+    existing_by_key = {_index_artifact_key(artifact): artifact for artifact in existing_artifacts}
+    reusable_keys = frozenset(
+        key
+        for key, artifact in existing_by_key.items()
+        if key in planned_keys
+        and _is_reusable_index_artifact(
             artifact,
             expected_retrieval_backend=services.retrieval_backend.__class__.__name__,
             expected_index_config_signature=services.index_config_signature(artifact.system_id),
         )
-    ]
-    existing_runs = _load_run_records_from_dir(experiment_dir, config)
-    successful_runs = [record for record in existing_runs if record.status == "succeeded"]
-    artifacts_by_key = {_index_artifact_key(artifact): artifact for artifact in reusable_artifacts}
-    reusable_runs = [
-        record
-        for record in successful_runs
-        if (
-            artifact := artifacts_by_key.get((record.system_id, record.corpus_id))
-        ) is not None
-        and _is_reusable_query_record(
-            record,
-            artifact,
-            expected_query_config_signature=services.query_config_signature,
-        )
-    ]
-    planned_index_units = len(config.systems) * len(loaded.corpora)
-    planned_query_units = (
-        len(config.systems) * len(loaded.question_set.items) * config.experiment.query_repetitions
+    )
+    existing_keys = frozenset(existing_by_key) & planned_keys
+    return IndexResumePlan(
+        planned_keys=planned_keys,
+        reusable_keys=reusable_keys,
+        stale_keys=existing_keys - reusable_keys,
+        missing_keys=planned_keys - existing_keys,
     )
 
-    typer.echo(f"Experiment: {config.experiment.id}")
-    typer.echo(f"Run control: resume={run_control.resume}, force={run_control.force}")
-    typer.echo(
-        "Planned units: "
-        f"index={planned_index_units}, query={planned_query_units}, "
-        f"existing_indexes={len(existing_artifacts)}, "
-        f"reusable_indexes={len(reusable_artifacts)}, "
-        f"existing_successful_queries={len(successful_runs)}, "
-        f"reusable_queries={len(reusable_runs)}"
+
+def _build_query_resume_plan(
+    config: ExperimentConfig,
+    loaded: LoadedDataset,
+    artifacts: list[IndexArtifact],
+    records: list[RagRunRecord],
+    *,
+    expected_query_config_signature: str,
+) -> QueryResumePlan:
+    artifacts_by_key = {_index_artifact_key(artifact): artifact for artifact in artifacts}
+    records_by_run_id = {record.run_id: record for record in records}
+    reusable: set[str] = set()
+    stale_succeeded: set[str] = set()
+    retry: set[str] = set()
+    missing: set[str] = set()
+    pending_system_ids: list[str] = []
+    stale_succeeded_system_ids: list[str] = []
+    planned_count = 0
+
+    for configured_system_id in config.systems:
+        system_id = config.system_config_for(configured_system_id).id
+        for item in loaded.question_set.items:
+            artifact = artifacts_by_key.get((system_id, item.corpus_id))
+            for repetition in range(config.experiment.query_repetitions):
+                planned_count += 1
+                run_id = stable_query_run_id(
+                    config.experiment.id,
+                    system_id,
+                    item.id,
+                    repetition,
+                )
+                record = records_by_run_id.get(run_id)
+                if record is None:
+                    missing.add(run_id)
+                    pending_system_ids.append(system_id)
+                elif record.status != "succeeded":
+                    retry.add(run_id)
+                    pending_system_ids.append(system_id)
+                elif artifact is not None and _is_reusable_query_record(
+                    record,
+                    artifact,
+                    expected_query_config_signature=expected_query_config_signature,
+                ):
+                    reusable.add(run_id)
+                else:
+                    stale_succeeded.add(run_id)
+                    pending_system_ids.append(system_id)
+                    stale_succeeded_system_ids.append(system_id)
+
+    return QueryResumePlan(
+        planned_count=planned_count,
+        reusable_run_ids=frozenset(reusable),
+        stale_succeeded_run_ids=frozenset(stale_succeeded),
+        retry_run_ids=frozenset(retry),
+        missing_run_ids=frozenset(missing),
+        pending_system_ids=tuple(pending_system_ids),
+        stale_succeeded_system_ids=tuple(stale_succeeded_system_ids),
     )
-    for line in describe_budget(run_control, budget.snapshot):
-        typer.echo(line)
+
+
+def _estimate_pending_query_usage(
+    records: list[RagRunRecord],
+    pending_system_ids: tuple[str, ...],
+) -> UsageRecord | None:
+    successful = [
+        record
+        for record in records
+        if record.status == "succeeded" and record.usage.model_calls > 0
+    ]
+    if not successful or not pending_system_ids:
+        return None
+    by_system: dict[str, list[UsageRecord]] = {}
+    for record in successful:
+        by_system.setdefault(record.system_id, []).append(record.usage)
+    global_usage = [record.usage for record in successful]
+
+    input_tokens = 0.0
+    output_tokens = 0.0
+    model_calls = 0.0
+    for system_id in pending_system_ids:
+        samples = by_system.get(system_id, global_usage)
+        input_tokens += sum(sample.input_tokens for sample in samples) / len(samples)
+        output_tokens += sum(sample.output_tokens for sample in samples) / len(samples)
+        model_calls += sum(sample.model_calls for sample in samples) / len(samples)
+    return UsageRecord(
+        input_tokens=round(input_tokens),
+        output_tokens=round(output_tokens),
+        model_calls=round(model_calls),
+    )
+
+
+def _estimate_pending_index_usage(
+    artifacts: list[IndexArtifact],
+    pending_keys: frozenset[tuple[str, str]],
+) -> UsageRecord | None:
+    samples_by_system: dict[str, list[UsageRecord]] = {}
+    all_samples: list[UsageRecord] = []
+    for artifact in artifacts:
+        usage = _usage_from_index_artifact(artifact)
+        if usage.model_calls <= 0:
+            continue
+        samples_by_system.setdefault(artifact.system_id, []).append(usage)
+        all_samples.append(usage)
+    if not all_samples or not pending_keys:
+        return None
+
+    estimates = []
+    for system_id, _ in pending_keys:
+        samples = samples_by_system.get(system_id, all_samples)
+        estimates.append(
+            UsageRecord(
+                input_tokens=round(sum(sample.input_tokens for sample in samples) / len(samples)),
+                output_tokens=round(sum(sample.output_tokens for sample in samples) / len(samples)),
+                model_calls=round(sum(sample.model_calls for sample in samples) / len(samples)),
+            )
+        )
+    return UsageRecord(
+        input_tokens=sum(estimate.input_tokens for estimate in estimates),
+        output_tokens=sum(estimate.output_tokens for estimate in estimates),
+        model_calls=sum(estimate.model_calls for estimate in estimates),
+    )
+
+
+def _scale_usage(usage: UsageRecord, factor: float) -> UsageRecord:
+    return UsageRecord(
+        input_tokens=round(usage.input_tokens * factor),
+        output_tokens=round(usage.output_tokens * factor),
+        model_calls=round(usage.model_calls * factor),
+        estimated_cost=(
+            usage.estimated_cost * factor if usage.estimated_cost is not None else None
+        ),
+    )
+
+
+def _work_breakdown(keys: frozenset[tuple[str, str]]) -> str:
+    counts = Counter(system_id for system_id, _ in keys)
+    return ", ".join(f"{system_id}={count}" for system_id, count in sorted(counts.items()))
+
+
+def _system_breakdown(system_ids: tuple[str, ...]) -> str:
+    counts = Counter(system_ids)
+    return ", ".join(f"{system_id}={count}" for system_id, count in sorted(counts.items()))
 
 
 def _prepare(config: ExperimentConfig) -> None:
@@ -349,21 +629,31 @@ async def _index(
         run_control,
         include_existing_usage=run_control.resume,
     )
-    existing_artifacts = (
-        _load_index_artifacts_if_present(services.artifact_store)
-        if run_control.resume and not run_control.force
-        else []
-    )
-    artifacts_by_key = {_index_artifact_key(artifact): artifact for artifact in existing_artifacts}
-    reusable_artifact_keys = {
-        _index_artifact_key(artifact)
-        for artifact in existing_artifacts
-        if _is_reusable_index_artifact(
-            artifact,
-            expected_retrieval_backend=services.retrieval_backend.__class__.__name__,
-            expected_index_config_signature=services.index_config_signature(artifact.system_id),
+    persisted_artifacts = _load_index_artifacts_if_present(services.artifact_store)
+    if persisted_artifacts and not run_control.resume and not run_control.force:
+        raise UnsafeResumeError(
+            f"Found {len(persisted_artifacts)} existing index artifact(s). Use --resume "
+            "to reuse them or --force to intentionally rebuild everything."
         )
-    }
+    existing_artifacts = persisted_artifacts if run_control.resume and not run_control.force else []
+    index_plan = _build_index_resume_plan(config, loaded, services, existing_artifacts)
+    if index_plan.stale_keys and not run_control.allow_stale_recompute:
+        raise UnsafeResumeError(
+            f"Refusing to replace {len(index_plan.stale_keys)} stale index artifact(s) "
+            f"({_work_breakdown(index_plan.stale_keys)}). Review --dry-run-budget, then "
+            "supply --allow-stale-recompute only if rebuilding them is intentional."
+        )
+    index_estimate = _estimate_pending_index_usage(
+        existing_artifacts,
+        index_plan.stale_keys | index_plan.missing_keys,
+    )
+    if index_estimate is not None:
+        budget.require_estimated_capacity(
+            "index phase",
+            _scale_usage(index_estimate, BUDGET_ESTIMATE_SAFETY_FACTOR),
+        )
+    artifacts_by_key = {_index_artifact_key(artifact): artifact for artifact in existing_artifacts}
+    reusable_artifact_keys = index_plan.reusable_keys
     indexed = 0
     reused = 0
     system_count = len(config.systems)
@@ -446,6 +736,48 @@ async def _query(
     )
     artifacts = _load_index_artifacts(services.artifact_store)
     corpora_by_id = {corpus.id: corpus for corpus in loaded.corpora}
+    index_plan = _build_index_resume_plan(config, loaded, services, artifacts)
+    if index_plan.missing_keys or index_plan.stale_keys:
+        details = []
+        if index_plan.missing_keys:
+            details.append(f"missing={len(index_plan.missing_keys)}")
+        if index_plan.stale_keys:
+            details.append(f"stale={len(index_plan.stale_keys)}")
+        raise UnsafeResumeError(
+            "Cannot query because the current index set is incomplete or stale "
+            f"({', '.join(details)}). Run `ldi index --dry-run-budget` first."
+        )
+    persisted_records = _load_run_records_if_present(config, services.artifact_store)
+    if persisted_records and not run_control.resume and not run_control.force:
+        raise UnsafeResumeError(
+            f"Found {len(persisted_records)} existing query record(s). Use --resume to "
+            "reuse them or --force to intentionally rerun everything."
+        )
+    existing_records = persisted_records if run_control.resume and not run_control.force else []
+    query_plan = _build_query_resume_plan(
+        config,
+        loaded,
+        artifacts,
+        existing_records,
+        expected_query_config_signature=services.query_config_signature,
+    )
+    if query_plan.stale_succeeded_run_ids and not run_control.allow_stale_recompute:
+        raise UnsafeResumeError(
+            f"Refusing to replace {len(query_plan.stale_succeeded_run_ids)} stale "
+            "successful query record(s) "
+            f"({_system_breakdown(query_plan.stale_succeeded_system_ids)}). Review "
+            "--dry-run-budget, then supply --allow-stale-recompute only if rerunning "
+            "them is intentional."
+        )
+    query_estimate = _estimate_pending_query_usage(
+        existing_records,
+        query_plan.pending_system_ids,
+    )
+    if query_estimate is not None:
+        budget.require_estimated_capacity(
+            "query phase",
+            _scale_usage(query_estimate, BUDGET_ESTIMATE_SAFETY_FACTOR),
+        )
     system_count = len(config.systems)
 
     services.emit_progress(f"Starting queries: {system_count} system(s)")
@@ -477,7 +809,6 @@ async def _query(
         succeeded = 0
         failed = 0
         reused = 0
-        skipped = 0
         for artifact in system_artifacts:
             corpus = corpora_by_id[artifact.corpus_id]
             items = [
@@ -512,29 +843,7 @@ async def _query(
                         continue
 
                     label = f"query {system.id}/{item.id}/rep-{repetition}"
-                    exhausted_reason = budget.exhausted_reason(label)
-                    if exhausted_reason is not None:
-                        records_by_run_id[run_id] = _skipped_run_record(
-                            config,
-                            system_id=system.id,
-                            corpus_id=corpus.id,
-                            item_id=item.id,
-                            repetition=repetition,
-                            index_artifact=artifact,
-                            query_config_signature=services.query_config_signature,
-                            reason=exhausted_reason,
-                        )
-                        skipped += 1
-                        services.emit_progress(
-                            f"{system.id} skipped question {question_index}/{question_count}: "
-                            f"{question_label}"
-                        )
-                        _write_system_run_records(
-                            services.artifact_store,
-                            system.id,
-                            records_by_run_id,
-                        )
-                        continue
+                    budget.require_available(label)
 
                     services.emit_progress(
                         f"{system.id} querying question {question_index}/{question_count}: "
@@ -584,8 +893,6 @@ async def _query(
         message = f"Query results for {system.id}: succeeded={succeeded}, failed={failed}"
         if reused:
             message += f", reused={reused}"
-        if skipped:
-            message += f", skipped={skipped}"
         typer.echo(message)
         services.emit_progress(
             f"Completed querying system {system_index}/{system_count}: {system.id}"
@@ -595,6 +902,27 @@ async def _query(
         "costs/query-usage.jsonl",
         preserve_existing=run_control.resume and not run_control.force,
     )
+    final_records = _load_run_records(config, services.artifact_store)
+    final_plan = _build_query_resume_plan(
+        config,
+        loaded,
+        artifacts,
+        final_records,
+        expected_query_config_signature=services.query_config_signature,
+    )
+    incomplete = (
+        len(final_plan.stale_succeeded_run_ids)
+        + len(final_plan.retry_run_ids)
+        + len(final_plan.missing_run_ids)
+    )
+    if incomplete:
+        raise BenchmarkIncompleteError(
+            f"Query phase is incomplete: {len(final_plan.retry_run_ids)} failed/skipped, "
+            f"{len(final_plan.missing_run_ids)} missing, and "
+            f"{len(final_plan.stale_succeeded_run_ids)} stale successful record(s). "
+            "All completed records were checkpointed; rerun with resume after correcting "
+            "the reported errors."
+        )
 
 
 def _evaluate(config: ExperimentConfig) -> None:
@@ -717,7 +1045,7 @@ def _report(config: ExperimentConfig) -> None:
     store.write_json("report/summary.json", bundle)
 
     markdown_path = store.path("report/results.md")
-    markdown_path.write_text(render_markdown_report(bundle), encoding="utf-8")
+    atomic_write_text(markdown_path, render_markdown_report(bundle))
     typer.echo(f"Wrote report to {markdown_path}")
 
 
@@ -731,6 +1059,15 @@ def _export_foundry_eval(
     loaded = loaded or _load_dataset(config)
     store = store or _artifact_store(config)
     records = records if records is not None else _load_run_records(config, store)
+    services = _services(config)
+    artifacts = _load_index_artifacts(store)
+    _validate_complete_query_records(
+        config,
+        loaded,
+        records,
+        artifacts=artifacts,
+        expected_query_config_signature=services.query_config_signature,
+    )
     items_by_id = {item.id: item for item in loaded.question_set.items}
     export = write_foundry_evaluation_export(
         store=store,
@@ -845,11 +1182,79 @@ def _publish_foundry_evals(
 
 
 def _ensure_foundry_export(config: ExperimentConfig, store: ArtifactStore) -> None:
-    dataset_path = store.experiment_dir / config.evaluation.foundry.dataset_path
-    manifest_path = store.experiment_dir / config.evaluation.foundry.manifest_path
-    if dataset_path.exists() and manifest_path.exists():
-        return
+    # This is local and deterministic. Rebuilding prevents an old but valid-looking
+    # export from being published after query records have changed.
     _export_foundry_eval(config, store=store)
+
+
+def _validate_complete_query_records(
+    config: ExperimentConfig,
+    loaded: LoadedDataset,
+    records: list[RagRunRecord],
+    *,
+    artifacts: list[IndexArtifact],
+    expected_query_config_signature: str,
+) -> None:
+    expected_run_ids = {
+        stable_query_run_id(
+            config.experiment.id,
+            config.system_config_for(system_id).id,
+            item.id,
+            repetition,
+        )
+        for system_id in config.systems
+        for item in loaded.question_set.items
+        for repetition in range(config.experiment.query_repetitions)
+    }
+    records_by_run_id = {record.run_id: record for record in records}
+    duplicate_count = len(records) - len(records_by_run_id)
+    missing = expected_run_ids - set(records_by_run_id)
+    unexpected = set(records_by_run_id) - expected_run_ids
+    failed = [
+        record
+        for run_id, record in records_by_run_id.items()
+        if run_id in expected_run_ids and record.status != "succeeded"
+    ]
+    empty_answers = [
+        record
+        for run_id, record in records_by_run_id.items()
+        if run_id in expected_run_ids and record.status == "succeeded" and not record.answer.strip()
+    ]
+    empty_contexts = [
+        record
+        for run_id, record in records_by_run_id.items()
+        if run_id in expected_run_ids
+        and record.status == "succeeded"
+        and not record.retrieved_items
+    ]
+    artifacts_by_key = {_index_artifact_key(artifact): artifact for artifact in artifacts}
+    stale = [
+        record
+        for run_id, record in records_by_run_id.items()
+        if run_id in expected_run_ids
+        and record.status == "succeeded"
+        and (
+            (artifact := artifacts_by_key.get((record.system_id, record.corpus_id))) is None
+            or not _is_reusable_query_record(
+                record,
+                artifact,
+                expected_query_config_signature=expected_query_config_signature,
+            )
+        )
+    ]
+    if not any(
+        (duplicate_count, missing, unexpected, failed, empty_answers, empty_contexts, stale)
+    ):
+        return
+
+    raise BenchmarkIncompleteError(
+        "Refusing to export an incomplete benchmark: "
+        f"expected={len(expected_run_ids)}, present={len(records_by_run_id)}, "
+        f"missing={len(missing)}, unexpected={len(unexpected)}, "
+        f"duplicates={duplicate_count}, failed_or_skipped={len(failed)}, "
+        f"empty_answers={len(empty_answers)}, empty_contexts={len(empty_contexts)}, "
+        f"stale={len(stale)}."
+    )
 
 
 def _load_dataset(config: ExperimentConfig) -> LoadedDataset:
@@ -1251,14 +1656,22 @@ def _usage_from_index_artifact(artifact: IndexArtifact) -> UsageRecord:
 
 
 def _load_run_records(config: ExperimentConfig, store: ArtifactStore) -> list[RagRunRecord]:
+    records = _load_run_records_if_present(config, store)
+    if not records:
+        raise FileNotFoundError("no run records found; run `ldi query` first")
+    return records
+
+
+def _load_run_records_if_present(
+    config: ExperimentConfig,
+    store: ArtifactStore,
+) -> list[RagRunRecord]:
     records: list[RagRunRecord] = []
     for system_id in config.systems:
         system = _create_system(config, system_id)
         records.extend(
             RagRunRecord.model_validate(row) for row in store.read_jsonl(f"runs/{system.id}.jsonl")
         )
-    if not records:
-        raise FileNotFoundError("no run records found; run `ldi query` first")
     return records
 
 
@@ -1294,38 +1707,6 @@ def _write_system_run_records(
         key=lambda record: (record.corpus_id, record.item_id, record.repetition),
     )
     store.write_jsonl(f"runs/{system_id}.jsonl", records)
-
-
-def _skipped_run_record(
-    config: ExperimentConfig,
-    *,
-    system_id: str,
-    corpus_id: str,
-    item_id: str,
-    repetition: int,
-    index_artifact: IndexArtifact,
-    query_config_signature: str,
-    reason: str,
-) -> RagRunRecord:
-    return RagRunRecord(
-        run_id=stable_query_run_id(config.experiment.id, system_id, item_id, repetition),
-        experiment_id=config.experiment.id,
-        system_id=system_id,
-        corpus_id=corpus_id,
-        item_id=item_id,
-        repetition=repetition,
-        selected_document_ids=[],
-        retrieved_items=[],
-        answer="",
-        citations=[],
-        usage=UsageRecord(),
-        index_artifact_id=index_artifact.id,
-        index_artifact_signature=index_artifact_signature(index_artifact),
-        query_policy_version=QUERY_RUN_POLICY_VERSION,
-        query_config_signature=query_config_signature,
-        status="skipped",
-        error=reason,
-    )
 
 
 def _load_run_records_for_report(
@@ -1495,7 +1876,8 @@ def _usage_event_key(
 
 
 def _write_csv(path: Path, fieldnames: list[str], rows: list[dict]) -> None:
-    with path.open("w", encoding="utf-8", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(rows)
+    handle = io.StringIO(newline="")
+    writer = csv.DictWriter(handle, fieldnames=fieldnames)
+    writer.writeheader()
+    writer.writerows(rows)
+    atomic_write_text(path, handle.getvalue())

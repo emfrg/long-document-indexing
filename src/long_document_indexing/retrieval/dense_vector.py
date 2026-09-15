@@ -11,6 +11,7 @@ from long_document_indexing.domain.corpus import Corpus
 from long_document_indexing.domain.runs import RetrievedItem, UsageRecord
 from long_document_indexing.models.base import EmbeddingClient
 from long_document_indexing.progress import await_with_progress
+from long_document_indexing.storage.artifacts import atomic_write_text
 
 DENSE_INDEX_VERSION = "dense-vector/v1"
 
@@ -94,7 +95,7 @@ class DenseVectorBackend:
             "embedding_model_id": self.embedding_client.model_id,
             "records": records,
         }
-        path.write_text(json.dumps(payload, separators=(",", ":")) + "\n", encoding="utf-8")
+        atomic_write_text(path, json.dumps(payload, separators=(",", ":")) + "\n")
         self._indexes[index_id] = payload
         self._pending_usage = _combine_usage(usage_records)
         return index_id

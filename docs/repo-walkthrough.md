@@ -105,6 +105,12 @@ Preview budget state before a live run:
 uv run --python 3.13 --extra foundry --no-editable --reinstall-package long-document-indexing ldi run --config configs/experiments/foundry-enterprise-stuffing-thin-slice.yaml --dry-run-budget
 ```
 
+The preview separates reusable, stale, failed/skipped, and missing work. Resume may
+continue failed or missing units automatically. Replacing stale completed work requires
+the explicit `--allow-stale-recompute` flag; `--force` intentionally replaces everything.
+Artifacts and ledgers are persisted atomically after each completed unit, and incomplete
+query sets are rejected before Foundry export or publication.
+
 Run the capped real enterprise stuffing benchmark:
 
 ```bash

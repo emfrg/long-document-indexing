@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from long_document_indexing.config import ExperimentConfig, FoundryEvaluationConfig
 from long_document_indexing.evaluation.foundry.adapter import foundry_item_schema
 from long_document_indexing.evaluation.foundry.managed import _azure_ai_project
-from long_document_indexing.storage.artifacts import ArtifactStore
+from long_document_indexing.storage.artifacts import ArtifactStore, atomic_write_text
 
 OPENAI_EVALS_DATASET_PATH = Path("evaluations/foundry/openai-evals-dataset.jsonl")
 OPENAI_EVALS_RESULT_PATH = Path("evaluations/foundry/openai-evals-result.json")
@@ -749,7 +749,7 @@ def _write_openai_evals_dataset(
 ) -> Path:
     target_path.parent.mkdir(parents=True, exist_ok=True)
     content, row_count = _openai_evals_dataset_content(source_path, system_id=system_id)
-    target_path.write_text(content, encoding="utf-8")
+    atomic_write_text(target_path, content)
     if system_id is not None and row_count == 0:
         raise RuntimeError(
             f"Foundry per-system publish found no exported rows for system {system_id!r}."

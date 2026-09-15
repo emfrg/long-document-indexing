@@ -223,6 +223,7 @@ class RunControlConfig(BaseModel):
 
     resume: bool = False
     force: bool = False
+    allow_stale_recompute: bool = False
     max_model_calls: int | None = None
     max_input_tokens: int | None = None
     max_output_tokens: int | None = None
