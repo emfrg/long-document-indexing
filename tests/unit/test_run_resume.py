@@ -9,14 +9,28 @@ from long_document_indexing.cli import (
     _index,
     _is_reusable_index_artifact,
     _is_reusable_query_record,
+    _load_index_artifacts_if_present,
+    _merge_usage_events,
     _prepare,
     _query,
 )
 from long_document_indexing.config import RunControlConfig, load_experiment_config
-from long_document_indexing.domain.maps import IndexArtifact
+from long_document_indexing.domain.maps import (
+    DocumentMap,
+    IndexArtifact,
+    MapEntry,
+    SourceReference,
+)
 from long_document_indexing.domain.runs import RagRunRecord
 from long_document_indexing.prompt_safety import PROMPT_SAFETY_POLICY_VERSION
-from long_document_indexing.run_control import BudgetExceeded
+from long_document_indexing.run_control import BudgetExceeded, BudgetLedger
+from long_document_indexing.storage.artifacts import ArtifactStore
+from long_document_indexing.storage.maps import (
+    DOCUMENT_MAP_CONTENT_SIGNATURE_POLICY_VERSION,
+    document_map_content_signature,
+    read_document_map,
+    write_document_map,
+)
 from long_document_indexing.systems.map_base import (
     MAP_SOURCE_REFERENCE_NORMALIZATION_POLICY_VERSION,
 )
@@ -91,6 +105,105 @@ def test_stale_map_artifacts_are_not_reusable(tmp_path) -> None:
     assert _is_reusable_index_artifact(current) is True
     assert _is_reusable_index_artifact(stale_prompt) is False
     assert _is_reusable_index_artifact(stale_normalization) is False
+
+
+def test_document_map_content_signature_ignores_json_key_order() -> None:
+    document_map = _document_map()
+    payload = document_map.model_dump(mode="json")
+    payload["facets"] = {"alpha": 2, "zeta": 1}
+    payload["entries"][0]["attributes"] = {"alpha": 2, "zeta": 1}
+    reordered = DocumentMap.model_validate(payload)
+
+    assert document_map_content_signature(document_map) == document_map_content_signature(reordered)
+
+
+def test_current_map_content_signature_detects_changed_map(tmp_path) -> None:
+    store = ArtifactStore(tmp_path / "artifacts", "experiment")
+    document_map = _document_map()
+    map_id, map_path = write_document_map(
+        store,
+        system_id="stuffing",
+        corpus_id="corpus",
+        document_map=document_map,
+    )
+    artifact_path = store.path("indexes/stuffing/index-current.json")
+    artifact_path.write_text("{}", encoding="utf-8")
+    artifact = IndexArtifact(
+        id="index-current",
+        system_id="stuffing",
+        corpus_id="corpus",
+        artifact_path=str(artifact_path),
+        document_map_ids=[map_id],
+        build_metadata={
+            "retrieval_backend": "DenseVectorBackend",
+            "index_config_signature": "index-config-current",
+            "document_map_paths": {map_id: str(map_path)},
+            "document_map_signatures": {map_id: document_map_content_signature(document_map)},
+            "document_map_signature_policy": (DOCUMENT_MAP_CONTENT_SIGNATURE_POLICY_VERSION),
+            "prompt_safety_policy": PROMPT_SAFETY_POLICY_VERSION,
+            "source_reference_normalization_policy": (
+                MAP_SOURCE_REFERENCE_NORMALIZATION_POLICY_VERSION
+            ),
+        },
+    )
+
+    assert _is_reusable_index_artifact(
+        artifact,
+        expected_retrieval_backend="DenseVectorBackend",
+        expected_index_config_signature="index-config-current",
+    )
+
+    changed = read_document_map(map_path).model_copy(update={"overview": "Changed overview"})
+    store.write_json(map_path.relative_to(store.experiment_dir), changed)
+    assert not _is_reusable_index_artifact(
+        artifact,
+        expected_retrieval_backend="DenseVectorBackend",
+        expected_index_config_signature="index-config-current",
+    )
+
+
+def test_index_discovery_recovers_individual_artifact_without_manifest(tmp_path) -> None:
+    store = ArtifactStore(tmp_path / "artifacts", "experiment")
+    artifact_path = store.path("indexes/stuffing/index-current.json")
+    artifact = IndexArtifact(
+        id="index-current",
+        system_id="stuffing",
+        corpus_id="corpus",
+        artifact_path=str(artifact_path),
+    )
+    store.write_json("indexes/stuffing/index-current.json", artifact)
+
+    assert _load_index_artifacts_if_present(store) == [artifact]
+
+
+def test_interrupted_resume_preserves_not_yet_rebuilt_artifacts(tmp_path) -> None:
+    config = _foundry_export_smoke_config(tmp_path).model_copy(
+        update={"systems": ["stuffing", "map_reduce"]}
+    )
+    _prepare(config)
+    asyncio.run(_index(config))
+
+    store = ArtifactStore(config.storage.artifacts_dir, config.experiment.id)
+    artifacts = _load_index_artifacts_if_present(store)
+    assert {artifact.system_id for artifact in artifacts} == {"stuffing", "map_reduce"}
+    for artifact in artifacts:
+        stale = artifact.model_copy(
+            update={
+                "build_metadata": {
+                    **artifact.build_metadata,
+                    "index_config_signature": "stale-index-config",
+                }
+            }
+        )
+        store.write_json(Path(stale.artifact_path).relative_to(store.experiment_dir), stale)
+
+    resume = config.model_copy(update={"run_control": RunControlConfig(resume=True)})
+    budget = BudgetLedger(RunControlConfig(max_model_calls=1))
+    with pytest.raises(BudgetExceeded, match="Budget exceeded after index stuffing"):
+        asyncio.run(_index(resume, budget=budget))
+
+    recovered = _load_index_artifacts_if_present(store)
+    assert {artifact.system_id for artifact in recovered} == {"stuffing", "map_reduce"}
 
 
 def test_query_records_are_reusable_only_for_matching_index_signature(tmp_path) -> None:
@@ -193,6 +306,30 @@ def test_index_budget_persists_completed_artifact_before_raising(tmp_path) -> No
     assert _jsonl_count(experiment_dir / "costs/index-usage.jsonl") == 2
 
 
+def test_usage_merge_keeps_distinct_retry_attempts_without_duplicating_writes() -> None:
+    first = UsageEvent(
+        experiment_id="experiment",
+        run_id="run",
+        system_id="stuffing",
+        corpus_id="corpus",
+        stage="index_system",
+        kind="system",
+        input_tokens=100,
+        timestamp="2026-09-15T08:00:00+00:00",
+    )
+    retry = first.model_copy(
+        update={
+            "input_tokens": 120,
+            "timestamp": "2026-09-15T09:00:00+00:00",
+        }
+    )
+
+    merged = _merge_usage_events([first], [retry])
+    assert len(merged) == 2
+    assert sum(event.input_tokens for event in merged) == 220
+    assert _merge_usage_events(merged, [retry]) == merged
+
+
 def _foundry_export_smoke_config(tmp_path: Path):
     config = load_experiment_config(
         Path("configs/experiments/foundry-eval-export-smoke.yaml"),
@@ -223,6 +360,27 @@ def _index_artifact(
             "prompt_safety_policy": prompt_safety_policy,
             "source_reference_normalization_policy": source_reference_normalization_policy,
         },
+    )
+
+
+def _document_map() -> DocumentMap:
+    return DocumentMap(
+        document_id="document",
+        overview="Overview",
+        entries=[
+            MapEntry(
+                id="entry",
+                kind="fact",
+                label="Label",
+                summary="Summary",
+                source_references=[
+                    SourceReference(document_id="document", segment_ids=["segment"])
+                ],
+                attributes={"zeta": 1, "alpha": 2},
+            )
+        ],
+        facets={"zeta": 1, "alpha": 2},
+        construction_method="stuffing",
     )
 
 

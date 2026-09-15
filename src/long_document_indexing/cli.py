@@ -54,7 +54,12 @@ from long_document_indexing.run_control import (
 )
 from long_document_indexing.services import Services
 from long_document_indexing.storage.artifacts import ArtifactStore
-from long_document_indexing.storage.maps import read_document_map
+from long_document_indexing.storage.maps import (
+    DOCUMENT_MAP_CONTENT_SIGNATURE_POLICY_VERSION,
+    document_map_content_signature,
+    document_map_id,
+    read_document_map,
+)
 from long_document_indexing.systems.map_base import (
     MAP_SOURCE_REFERENCE_NORMALIZATION_POLICY_VERSION,
 )
@@ -349,8 +354,9 @@ async def _index(
         if run_control.resume and not run_control.force
         else []
     )
-    artifacts_by_key = {
-        _index_artifact_key(artifact): artifact
+    artifacts_by_key = {_index_artifact_key(artifact): artifact for artifact in existing_artifacts}
+    reusable_artifact_keys = {
+        _index_artifact_key(artifact)
         for artifact in existing_artifacts
         if _is_reusable_index_artifact(
             artifact,
@@ -372,7 +378,7 @@ async def _index(
         services.emit_progress(f"Indexing system {system_index}/{system_count}: {system.id}")
         for corpus_index, corpus in enumerate(loaded.corpora, start=1):
             key = (system.id, corpus.id)
-            if key in artifacts_by_key:
+            if key in reusable_artifact_keys:
                 reused += 1
                 services.emit_progress(
                     f"{system.id} reused case {corpus_index}/{corpus_count}: {corpus.id}"
@@ -1064,28 +1070,42 @@ def _create_system(config: ExperimentConfig, system_id: str):
 
 
 def _load_index_artifacts(store: ArtifactStore) -> list[IndexArtifact]:
-    rows = store.read_jsonl("indexes/index_artifacts.jsonl")
-    if not rows:
+    artifacts = _discover_index_artifacts(store.experiment_dir)
+    if not artifacts:
         raise FileNotFoundError("no index artifacts found; run `ldi index` first")
-    return [IndexArtifact.model_validate(row) for row in rows]
+    return artifacts
 
 
 def _load_index_artifacts_if_present(store: ArtifactStore) -> list[IndexArtifact]:
-    return [
-        IndexArtifact.model_validate(row)
-        for row in store.read_jsonl("indexes/index_artifacts.jsonl")
-    ]
+    return _discover_index_artifacts(store.experiment_dir)
 
 
 def _load_index_artifacts_from_dir(experiment_dir: Path) -> list[IndexArtifact]:
+    return _discover_index_artifacts(experiment_dir)
+
+
+def _discover_index_artifacts(experiment_dir: Path) -> list[IndexArtifact]:
+    artifacts_by_key: dict[tuple[str, str], IndexArtifact] = {}
     path = experiment_dir / "indexes/index_artifacts.jsonl"
-    if not path.exists():
-        return []
-    return [
-        IndexArtifact.model_validate_json(line)
-        for line in path.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
+    if path.exists():
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                artifact = IndexArtifact.model_validate_json(line)
+                artifacts_by_key[_index_artifact_key(artifact)] = artifact
+
+    # A process can stop after writing an individual artifact but before updating
+    # the aggregate manifest. Individual files are therefore the recovery source.
+    indexes_dir = experiment_dir / "indexes"
+    if indexes_dir.exists():
+        for artifact_path in sorted(indexes_dir.glob("*/index-*.json")):
+            try:
+                artifact = IndexArtifact.model_validate_json(
+                    artifact_path.read_text(encoding="utf-8")
+                )
+            except (OSError, ValueError):
+                continue
+            artifacts_by_key[_index_artifact_key(artifact)] = artifact
+    return list(artifacts_by_key.values())
 
 
 def _write_index_artifacts(
@@ -1172,12 +1192,35 @@ def _has_current_document_map_content(
     signatures = artifact.build_metadata.get("document_map_signatures")
     if not isinstance(signatures, dict) or set(signatures) != set(paths):
         return False
+    signature_policy = artifact.build_metadata.get("document_map_signature_policy")
+    if signature_policy is None:
+        return _has_valid_legacy_document_maps(artifact, paths)
+    if signature_policy != DOCUMENT_MAP_CONTENT_SIGNATURE_POLICY_VERSION:
+        return False
     try:
         return all(
-            signatures[map_id]
-            == stable_id(
-                "document-map-content",
-                read_document_map(str(path)).model_dump_json(),
+            signatures[map_id] == document_map_content_signature(read_document_map(str(path)))
+            for map_id, path in paths.items()
+        )
+    except (OSError, ValueError):
+        return False
+
+
+def _has_valid_legacy_document_maps(
+    artifact: IndexArtifact,
+    paths: dict[str, Any],
+) -> bool:
+    """Validate maps written before canonical content signatures were introduced."""
+
+    if set(artifact.document_map_ids) != set(paths):
+        return False
+    try:
+        return all(
+            map_id
+            == document_map_id(
+                artifact.system_id,
+                artifact.corpus_id,
+                read_document_map(str(path)).document_id,
             )
             for map_id, path in paths.items()
         )
@@ -1432,11 +1475,14 @@ def _merge_usage_events(
             event.repetition,
             event.stage,
             event.kind,
+            event.timestamp,
         ),
     )
 
 
-def _usage_event_key(event: UsageEvent) -> tuple[str, str, str | None, int, str, str]:
+def _usage_event_key(
+    event: UsageEvent,
+) -> tuple[str, str, str | None, int, str, str, str]:
     return (
         event.run_id,
         event.stage,
@@ -1444,6 +1490,7 @@ def _usage_event_key(event: UsageEvent) -> tuple[str, str, str | None, int, str,
         event.repetition,
         event.kind,
         event.system_id,
+        event.timestamp,
     )
 
 

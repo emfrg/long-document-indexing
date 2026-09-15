@@ -27,7 +27,12 @@ from long_document_indexing.prompt_safety import (
 from long_document_indexing.prompts import render_prompt
 from long_document_indexing.routing import route_documents_from_maps
 from long_document_indexing.services import Services
-from long_document_indexing.storage.maps import read_document_map, write_document_map
+from long_document_indexing.storage.maps import (
+    DOCUMENT_MAP_CONTENT_SIGNATURE_POLICY_VERSION,
+    document_map_content_signature,
+    read_document_map,
+    write_document_map,
+)
 from long_document_indexing.telemetry.tracing import stable_id, stable_query_run_id
 from long_document_indexing.text import (
     approximate_token_count,
@@ -91,9 +96,7 @@ class DocumentMapSystemBase(ABC):
                 document_map=document_map,
             )
             document_map_paths[map_id] = str(path)
-            document_map_signatures[map_id] = stable_id(
-                "document-map-content", document_map.model_dump_json()
-            )
+            document_map_signatures[map_id] = document_map_content_signature(document_map)
 
         intermediate_map_paths: dict[str, str] = {}
         for map_id, document_map in intermediate_maps.items():
@@ -109,6 +112,7 @@ class DocumentMapSystemBase(ABC):
             "retrieval_backend": services.retrieval_backend.__class__.__name__,
             "document_map_paths": document_map_paths,
             "document_map_signatures": document_map_signatures,
+            "document_map_signature_policy": (DOCUMENT_MAP_CONTENT_SIGNATURE_POLICY_VERSION),
             "index_config_signature": services.index_config_signature(self.id),
             "document_statuses": result.statuses,
             "usage": total_usage.model_dump(mode="json"),
