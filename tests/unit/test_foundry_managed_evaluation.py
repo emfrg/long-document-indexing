@@ -117,6 +117,47 @@ def test_foundry_managed_evaluation_rejects_dataset_manifest_mismatch(tmp_path) 
         )
 
 
+def test_foundry_managed_evaluation_rejects_failed_or_empty_rows_before_sdk_call(
+    tmp_path,
+) -> None:
+    config = _config(tmp_path)
+    store = ArtifactStore(config.storage.artifacts_dir, config.experiment.id)
+    failed_record = _record().model_copy(
+        update={
+            "status": "failed",
+            "answer": "",
+            "retrieved_items": [],
+            "citations": [],
+            "error": "answer generation failed",
+        }
+    )
+    write_foundry_evaluation_export(
+        store=store,
+        records=[failed_record],
+        items_by_id={"q_alpha": _item()},
+        config=config.evaluation.foundry,
+        experiment_id=config.experiment.id,
+    )
+    calls = 0
+
+    def fake_evaluate(**_: Any) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        return {}
+
+    with pytest.raises(
+        ValueError,
+        match=r"stuffing/q_alpha \(status=failed; empty=response\)",
+    ):
+        run_foundry_managed_evaluation(
+            config=config,
+            store=store,
+            evaluate_fn=fake_evaluate,
+        )
+
+    assert calls == 0
+
+
 def test_foundry_managed_evaluation_calls_injected_evaluate_with_rag_mappings(
     tmp_path,
 ) -> None:

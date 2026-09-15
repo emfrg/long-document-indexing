@@ -324,6 +324,8 @@ judged rows total. It runs and
 checkpoints each evaluator separately for each system, so rerunning after a connection
 error reuses completed system/evaluator pairs. Each SDK call contains one evaluator and
 twelve rows, with evaluator errors configured to fail and retry that small unit.
+Before making any Foundry call, the managed evaluator rejects failed runs or rows with
+empty fields and identifies the affected system/question pairs locally.
 
 Preview and run the sampled managed evaluation:
 

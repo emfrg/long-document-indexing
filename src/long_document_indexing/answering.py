@@ -3,9 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from pydantic import ValidationError
+
 from long_document_indexing.domain.benchmark import BenchmarkItem
 from long_document_indexing.domain.runs import Citation, RetrievedItem, UsageRecord
-from long_document_indexing.models.base import GenerationRequest
+from long_document_indexing.models.base import GenerationRequest, TextGenerationClient
 from long_document_indexing.models.structured_outputs import (
     StructuredAnswerCitation,
     StructuredGeneratedAnswer,
@@ -14,9 +16,12 @@ from long_document_indexing.progress import await_with_progress
 from long_document_indexing.prompt_safety import (
     apply_prompt_safety_preamble,
     sanitize_for_model_prompt,
+    sanitize_for_model_recovery_prompt,
 )
 from long_document_indexing.prompts import render_prompt
 from long_document_indexing.services import Services
+
+ANSWER_GENERATION_MAX_ATTEMPTS = 3
 
 
 @dataclass(frozen=True)
@@ -107,27 +112,108 @@ async def _generated_answer(
             },
         )
     )
-    response = await await_with_progress(
-        client.generate(
-            GenerationRequest(
-                prompt=prompt,
-                prompt_name="shared/answer",
-                metadata={
-                    "task": "answer_query",
-                    "query": item.query,
-                    "evidence": evidence,
-                },
-                response_model=StructuredGeneratedAnswer,
-            )
-        ),
-        emit=services.progress,
-        message="answering waiting for model response",
+    request = GenerationRequest(
+        prompt=prompt,
+        prompt_name="shared/answer",
+        metadata={
+            "task": "answer_query",
+            "query": item.query,
+            "evidence": evidence,
+        },
+        response_model=StructuredGeneratedAnswer,
     )
-    generated = StructuredGeneratedAnswer.model_validate_json(response.content)
+    generated, citations, usage = await _generate_answer_with_recovery(
+        client=client,
+        request=request,
+        evidence=evidence,
+        services=services,
+    )
     return AnswerResult(
         answer=generated.answer,
-        citations=_validated_generated_citations(generated.citations, evidence),
-        usage=response.usage,
+        citations=citations,
+        usage=usage,
+    )
+
+
+async def _generate_answer_with_recovery(
+    *,
+    client: TextGenerationClient,
+    request: GenerationRequest,
+    evidence: list[dict[str, Any]],
+    services: Services,
+) -> tuple[StructuredGeneratedAnswer, list[Citation], UsageRecord]:
+    current_request = request
+    usage_records: list[UsageRecord] = []
+    for attempt in range(1, ANSWER_GENERATION_MAX_ATTEMPTS + 1):
+        try:
+            response = await await_with_progress(
+                client.generate(current_request),
+                emit=services.progress,
+                message="answering waiting for model response",
+            )
+            usage_records.append(response.usage)
+            generated = StructuredGeneratedAnswer.model_validate_json(response.content)
+            if not generated.answer.strip():
+                raise ValueError("generated answer is empty")
+            citations = _validated_generated_citations(generated.citations, evidence)
+        except Exception as exc:
+            if attempt == ANSWER_GENERATION_MAX_ATTEMPTS or not _recoverable_answer_error(exc):
+                raise
+            services.emit_progress(
+                "answering returned invalid or filtered structured output; "
+                f"retrying with neutral legal abstraction ({attempt + 1}/"
+                f"{ANSWER_GENERATION_MAX_ATTEMPTS})"
+            )
+            current_request = request.model_copy(
+                update={"prompt": _answer_recovery_prompt(request.prompt)}
+            )
+            continue
+        return generated, citations, _combine_usage_records(usage_records)
+
+    raise AssertionError("answer generation recovery loop terminated unexpectedly")
+
+
+def _answer_recovery_prompt(prompt: str) -> str:
+    return (
+        f"{sanitize_for_model_recovery_prompt(prompt)}\n\n"
+        "Validation correction: return one complete structured answer. Use only the exact "
+        "evidence_id values supplied in the prompt, keep the answer under 250 words, and keep "
+        "each citation quote under 40 words. If the evidence cannot support an answer, return "
+        "the structured insufficient_evidence result."
+    )
+
+
+def _recoverable_answer_error(exc: Exception) -> bool:
+    if isinstance(exc, ValidationError):
+        return True
+    message = str(exc).lower()
+    return any(
+        marker in message
+        for marker in (
+            "cannot assist",
+            "can't assist",
+            "content_filter",
+            "generated answer is empty",
+            "invalid json",
+            "parsed structured output",
+            "response ended with status incomplete",
+            "unable to assist",
+            "unknown evidence",
+        )
+    )
+
+
+def _combine_usage_records(records: list[UsageRecord]) -> UsageRecord:
+    estimated_costs = [
+        record.estimated_cost for record in records if record.estimated_cost is not None
+    ]
+    return UsageRecord(
+        input_tokens=sum(record.input_tokens for record in records),
+        output_tokens=sum(record.output_tokens for record in records),
+        model_calls=sum(record.model_calls for record in records),
+        tool_calls=sum(record.tool_calls for record in records),
+        duration_ms=sum(record.duration_ms for record in records),
+        estimated_cost=sum(estimated_costs) if estimated_costs else None,
     )
 
 

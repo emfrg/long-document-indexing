@@ -468,7 +468,8 @@ async def _query(
             if run_control.resume and not run_control.force
             else {}
         )
-        queried = 0
+        succeeded = 0
+        failed = 0
         reused = 0
         skipped = 0
         for artifact in system_artifacts:
@@ -545,7 +546,10 @@ async def _query(
                         repetition=repetition,
                     )
                     records_by_run_id[run_id] = record
-                    queried += 1
+                    if record.status == "succeeded":
+                        succeeded += 1
+                    else:
+                        failed += 1
                     budget.add_usage(record.usage)
                     _write_system_run_records(
                         services.artifact_store,
@@ -558,17 +562,24 @@ async def _query(
                         preserve_existing=run_control.resume and not run_control.force,
                     )
                     elapsed = time.perf_counter() - started
-                    services.emit_progress(
-                        f"{system.id} answered question {question_index}/{question_count}: "
-                        f"{question_label} ({elapsed:.1f}s)"
-                    )
+                    if record.status == "succeeded":
+                        services.emit_progress(
+                            f"{system.id} answered question {question_index}/{question_count}: "
+                            f"{question_label} ({elapsed:.1f}s)"
+                        )
+                    else:
+                        error = str(record.error or "unknown error").splitlines()[0]
+                        services.emit_progress(
+                            f"{system.id} failed question {question_index}/{question_count}: "
+                            f"{question_label} ({error})"
+                        )
                     budget.require_not_exceeded(label)
         _write_system_run_records(services.artifact_store, system.id, records_by_run_id)
-        message = f"Queried {queried} item run(s) for {system.id}"
+        message = f"Query results for {system.id}: succeeded={succeeded}, failed={failed}"
         if reused:
-            message += f"; reused {reused}"
+            message += f", reused={reused}"
         if skipped:
-            message += f"; skipped {skipped}"
+            message += f", skipped={skipped}"
         typer.echo(message)
         services.emit_progress(
             f"Completed querying system {system_index}/{system_count}: {system.id}"

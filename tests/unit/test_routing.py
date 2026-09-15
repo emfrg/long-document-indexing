@@ -42,13 +42,32 @@ async def test_model_router_receives_structured_maps_and_returns_decision(tmp_pa
 
 
 async def test_model_router_rejects_unknown_document_id(tmp_path) -> None:
+    generator = _RoutingClient(["invented_doc"])
     with pytest.raises(ValueError, match="unknown document"):
         await route_documents_from_maps(
             query="question",
             document_maps=[_map("doc_complaint")],
-            services=_services(tmp_path, _RoutingClient(["invented_doc"])),
+            services=_services(tmp_path, generator),
             top_k=1,
         )
+    assert generator.calls == 3
+
+
+async def test_model_router_recovers_from_unknown_document_id(tmp_path) -> None:
+    generator = _RecoveringRoutingClient()
+    progress: list[str] = []
+
+    result = await route_documents_from_maps(
+        query="question",
+        document_maps=[_map("doc_complaint")],
+        services=_services(tmp_path, generator, progress=progress.append),
+        top_k=1,
+    )
+
+    assert result.decision.selected_document_ids == ["doc_complaint"]
+    assert result.usage.model_calls == 2
+    assert "exact identifiers" in generator.requests[1].prompt
+    assert any("retrying with exact document identifiers (2/3)" in line for line in progress)
 
 
 def test_structured_routing_content_does_not_include_domain_metadata() -> None:
@@ -69,8 +88,10 @@ class _RoutingClient:
     def __init__(self, selected_document_ids: list[str]) -> None:
         self.selected_document_ids = selected_document_ids
         self.request: GenerationRequest | None = None
+        self.calls = 0
 
     async def generate(self, request: GenerationRequest) -> GenerationResponse:
+        self.calls += 1
         self.request = request
         return GenerationResponse(
             content=json.dumps(
@@ -81,6 +102,27 @@ class _RoutingClient:
                 }
             ),
             usage=UsageRecord(input_tokens=20, output_tokens=8, model_calls=1),
+        )
+
+
+class _RecoveringRoutingClient:
+    def __init__(self) -> None:
+        self.requests: list[GenerationRequest] = []
+
+    async def generate(self, request: GenerationRequest) -> GenerationResponse:
+        self.requests.append(request)
+        selected_document_ids = (
+            ["invented_doc"] if len(self.requests) == 1 else ["doc_complaint"]
+        )
+        return GenerationResponse(
+            content=json.dumps(
+                {
+                    "selected_document_ids": selected_document_ids,
+                    "rationale": "The complaint is relevant.",
+                    "unresolved_information_needs": [],
+                }
+            ),
+            usage=UsageRecord(model_calls=1),
         )
 
 

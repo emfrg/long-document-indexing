@@ -113,6 +113,10 @@ def run_foundry_managed_evaluation(
             "Foundry evaluation row count does not match its manifest. "
             "Run `ldi evaluate` or `ldi export-foundry-eval` again."
         )
+    _validate_managed_dataset_rows(
+        _read_managed_dataset_rows(dataset_path),
+        evaluator_names=foundry_config.managed_evaluators,
+    )
 
     azure_ai_project = _azure_ai_project(foundry_config)
     evaluation_name = foundry_config.evaluation_name or config.experiment.id
@@ -486,6 +490,70 @@ def _read_managed_dataset_rows(path: Path) -> list[dict[str, Any]]:
                 raise ValueError(f"managed dataset row {line_number} must be an object")
             rows.append(row)
     return rows
+
+
+def _validate_managed_dataset_rows(
+    rows: list[dict[str, Any]],
+    *,
+    evaluator_names: list[str],
+) -> None:
+    required_fields = _required_managed_text_fields(evaluator_names)
+    problems = []
+    for row in rows:
+        reasons = []
+        status = str(row.get("status") or "").strip()
+        if status != "succeeded":
+            reasons.append(f"status={status or 'missing'}")
+        empty_fields = [
+            field
+            for field in required_fields
+            if not isinstance(row.get(field), str) or not str(row[field]).strip()
+        ]
+        if empty_fields:
+            reasons.append("empty=" + ",".join(empty_fields))
+        if not reasons:
+            continue
+        system_id = str(row.get("system_id") or "unknown-system")
+        item_id = str(row.get("item_id") or row.get("id") or "unknown-item")
+        problems.append(f"{system_id}/{item_id} ({'; '.join(reasons)})")
+
+    if not problems:
+        return
+    shown = problems[:20]
+    remainder = len(problems) - len(shown)
+    details = "; ".join(shown)
+    if remainder:
+        details += f"; and {remainder} more"
+    raise ValueError(
+        "Foundry managed evaluation cannot score failed or empty benchmark rows: "
+        f"{details}. Rerun `ldi query` or `ldi run` with resume, then regenerate the "
+        "evaluation export before calling Foundry."
+    )
+
+
+def _required_managed_text_fields(evaluator_names: list[str]) -> list[str]:
+    fields: set[str] = set()
+    for evaluator_name in evaluator_names:
+        name = evaluator_name.lower()
+        if name in {"groundedness", "qa", "relevance", "retrieval"}:
+            fields.add("query")
+        if name in _TEXT_SCORE_EVALUATORS | {
+            "groundedness",
+            "qa",
+            "relevance",
+            "response_completeness",
+            "similarity",
+        }:
+            fields.add("response")
+        if name in {"groundedness", "qa", "retrieval"}:
+            fields.add("context")
+        if name in _TEXT_SCORE_EVALUATORS | {
+            "qa",
+            "response_completeness",
+            "similarity",
+        }:
+            fields.add("ground_truth")
+    return sorted(fields)
 
 
 def _sample_managed_rows(

@@ -61,10 +61,11 @@ async def test_generated_answer_uses_structured_model_and_validates_citations(tm
 
 
 async def test_generated_answer_rejects_citations_outside_retrieved_evidence(tmp_path) -> None:
+    client = _InvalidCitationClient()
     services = _services(
         tmp_path,
         answering_mode="generated",
-        generator_client=_InvalidCitationClient(),
+        generator_client=client,
     )
 
     with pytest.raises(ValueError, match="unknown evidence"):
@@ -74,6 +75,49 @@ async def test_generated_answer_rejects_citations_outside_retrieved_evidence(tmp
             services=services,
             extractive_prefix="Local answer",
         )
+    assert client.calls == 3
+
+
+async def test_generated_answer_recovers_from_sensitive_content_refusal(tmp_path) -> None:
+    progress: list[str] = []
+    client = _RefusalThenValidClient()
+    services = _services(
+        tmp_path,
+        answering_mode="generated",
+        generator_client=client,
+        progress=progress.append,
+    )
+
+    result = await answer_from_retrieved_evidence(
+        item=_item(),
+        retrieved_items=_retrieved_items(),
+        services=services,
+        extractive_prefix="Local answer",
+    )
+
+    assert result.answer.startswith("Fake generated answer")
+    assert result.usage.model_calls == 2
+    assert client.prompts[1].startswith("Recovery instruction:")
+    assert any("retrying with neutral legal abstraction (2/3)" in line for line in progress)
+
+
+async def test_generated_answer_recovers_from_truncated_json(tmp_path) -> None:
+    client = _RefusalThenValidClient(first_content='{"status":"answered","answer":"cut off')
+    services = _services(
+        tmp_path,
+        answering_mode="generated",
+        generator_client=client,
+    )
+
+    result = await answer_from_retrieved_evidence(
+        item=_item(),
+        retrieved_items=_retrieved_items(),
+        services=services,
+        extractive_prefix="Local answer",
+    )
+
+    assert result.answer.startswith("Fake generated answer")
+    assert result.usage.model_calls == 2
 
 
 async def test_generated_answer_normalizes_citation_ids_from_evidence_id(tmp_path) -> None:
@@ -96,7 +140,11 @@ async def test_generated_answer_normalizes_citation_ids_from_evidence_id(tmp_pat
 
 
 class _InvalidCitationClient:
+    def __init__(self) -> None:
+        self.calls = 0
+
     async def generate(self, request: GenerationRequest) -> GenerationResponse:
+        self.calls += 1
         assert request.response_model is StructuredGeneratedAnswer
         return GenerationResponse(
             content=json.dumps(
@@ -115,6 +163,25 @@ class _InvalidCitationClient:
             ),
             usage=UsageRecord(model_calls=1),
         )
+
+
+class _RefusalThenValidClient:
+    def __init__(
+        self,
+        first_content: str = "I'm sorry, but I cannot assist with that request.",
+    ) -> None:
+        self.prompts: list[str] = []
+        self.first_content = first_content
+        self._fake = FakeTextGenerationClient()
+
+    async def generate(self, request: GenerationRequest) -> GenerationResponse:
+        self.prompts.append(request.prompt)
+        if len(self.prompts) == 1:
+            return GenerationResponse(
+                content=self.first_content,
+                usage=UsageRecord(model_calls=1),
+            )
+        return await self._fake.generate(request)
 
 
 class _MismatchedCitationClient:
