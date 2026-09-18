@@ -1,433 +1,417 @@
 # Long Document Indexing
 
-A Python framework for benchmarking long-document indexing strategies for retrieval-augmented generation.
+This project compares ways to retrieve evidence from long, multi-document case files.
 
-The repository is intentionally benchmark-first:
+Its central question is simple:
 
-1. Normalize corpora and benchmark questions into stable schemas.
-2. Build one or more RAG system indexes.
-3. Run questions through each system.
-4. Persist standardized run records.
-5. Evaluate deterministic retrieval, evidence, and citation metrics locally.
-6. Export Foundry-ready evaluation datasets behind an adapter.
+> Does a structured map of each document help a RAG system find the right evidence?
 
-Local smoke runs use deterministic fake models. Real experiments use model embeddings for dense retrieval and an LLM router that reasons over complete document maps before raw-evidence retrieval.
+The main benchmark uses legal case files from Multi-LexSum. It compares ordinary dense
+retrieval with six ways of building document maps. Every system answers the same
+questions, uses the same answer model, and is scored with the same retrieval labels.
 
-Python 3.12 or 3.13 is required. Python 3.14 release candidates are intentionally excluded until the dependency stack supports them cleanly.
+This README starts with the idea, then shows the exact implementation, how to run a
+small local example, and how to reproduce the paid legal benchmark.
 
-## Repo Walkthrough
+## The Retrieval Problem
 
-For the architectural walkthrough, milestone map, runtime flow, and extension points, read [docs/repo-walkthrough.md](docs/repo-walkthrough.md).
-
-The short version is:
+A basic RAG system splits documents into passages, embeds those passages, and retrieves
+the passages most similar to a question:
 
 ```text
-experiment config -> dataset adapter -> services -> index/query workflows
-                  -> RAG system -> run records + usage -> metrics/export/report
+question -> search every passage -> top passages -> answer model
 ```
 
-## Milestone Map
+This works well when the answer is contained in one passage with wording close to the
+question. Long legal case files are harder:
 
-| Milestone | Name | Boundary |
-| --- | --- | --- |
-| 1 | Python benchmark kernel | Local domain schemas, smoke data, lexical retrieval, baseline metrics. |
-| 2 | Workflow and Telemetry foundation | Workflow runner boundary, trace records, usage ledgers, prompt loading. |
-| 3 | First Document Maps Systems | `stuffing`, `map_reduce`, and `refine` systems over shared map contracts. |
-| 4 | Real Model Client thin slice | OpenAI-compatible inference client behind the generation interface. |
-| 5 | MAF workflow thin slice | Optional Microsoft Agent Framework runner without changing system code. |
-| 6 | Foundry GPT-5 Structured Generation | Responses API path with Pydantic-backed structured outputs. |
-| 7 | Model-Backed Answer Generation | Optional generated answers with validated retrieved-evidence citations. |
-| 8 | Foundry Evaluation Export | Local JSONL export in a Foundry-ready single-turn shape. |
-| 9 | Multi-System Real Benchmark Run | Real GPT-5-family smoke comparison across all implemented systems. |
-| 10 | Analysis And Reporting Upgrade | Markdown, CSV, usage, issue, and system scorecard reports. |
-| 11 | Larger Benchmark Dataset Thin Slice | Versioned synthetic enterprise benchmark fixture. |
-| 12 | Resumable And Budgeted Live Runs | Resume, force, dry-run budget, and model-call/token/cost limits. |
-| 13 | Foundry Managed Evaluation Execution | Azure AI Evaluation SDK path over exported datasets. |
-| 14 | Larger Real Benchmark Run | GPT-5-family stuffing run over the enterprise thin slice. |
-| 15 | Repo Polish And Final Walkthrough | Documentation, verification, and final repository tour. |
+- One case may contain complaints, motions, orders, settlements, and later decisions.
+- The question may use different language from the source.
+- Answering may require evidence from several documents.
+- A locally similar passage may be from the wrong stage of the case.
+- Splitting a document into passages removes some of its overall structure.
 
-## Quick Start
+The benchmark therefore separates two retrieval decisions:
+
+1. **Document routing:** Which documents are likely to contain the answer?
+2. **Evidence retrieval:** Which raw passages inside those documents support the answer?
+
+## What Is a Document Map?
+
+A document map is a compact, structured description of one source document. It is an
+index, not the source itself and not a generated answer.
+
+Each map contains:
+
+- an overview of the document;
+- entries for important facts, events, claims, decisions, or other topics;
+- references from every entry back to the source document and source passages.
+
+The core data model is in
+[`src/long_document_indexing/domain/maps.py`](src/long_document_indexing/domain/maps.py).
+A map entry has a `kind`, `label`, `summary`, and `source_references`. Entries may also
+have attributes and child entries.
+
+This is a selected entry from an actual map generated by the extended benchmark:
+
+```yaml
+document_id: CJ-AL-0007:doc_0001
+construction_method: map_reduce
+entry:
+  id: E1_case
+  kind: case_summary
+  label: Case overview & parties
+  summary: >
+    Named plaintiffs (Sharnalle Mitchell; Lorenzo Brown; Courtney Tubbs;
+    Tito Williams) sued the City of Montgomery; complaint filed 03/18/2014
+    (Case No. 2:14-cv-00186-MEF-CSC) seeking declaratory, injunctive,
+    and monetary relief.
+  source_references:
+    - document_id: CJ-AL-0007:doc_0001
+      segment_ids: [CJ-AL-0007:doc_0001:seg_0001]
+    - document_id: CJ-AL-0007:doc_0001
+      segment_ids: [CJ-AL-0007:doc_0001:seg_0008]
+```
+
+The router can read this compact entry to understand what the document contains. The
+segment IDs let the system return to the original text when it needs evidence.
+
+## Exactly How Map RAG Works Here
+
+The repository builds two indexes for every mapped system:
+
+```text
+INDEXING
+
+source document -> ordered passages -> map-building method -> document map
+       |
+       +---------------------------> dense passage index
+
+
+QUERYING
+
+question
+   |
+   v
+LLM router reads the complete document maps
+   |
+   v
+select up to 3 documents
+   |
+   v
+dense search over raw passages from those documents
+   |
+   v
+retrieve up to 8 raw evidence passages
+   |
+   v
+shared answer model -> answer and citations
+```
+
+The important detail is that the answer model receives raw source passages. It does not
+answer from map summaries. Maps are used to choose documents; dense retrieval is used to
+choose evidence within them.
+
+The flat-vector baseline skips the map and router:
+
+```text
+question -> dense search over every raw passage -> top 8 passages -> shared answer model
+```
+
+This makes the comparison meaningful. The main difference is whether a document-map
+routing stage narrows the search before passage retrieval.
+
+The exact shared map query flow is implemented in
+[`src/long_document_indexing/systems/map_base.py`](src/long_document_indexing/systems/map_base.py).
+The baseline is implemented in
+[`src/long_document_indexing/systems/flat_vector.py`](src/long_document_indexing/systems/flat_vector.py).
+
+## Systems Compared
+
+All six map systems use the query flow above. They differ in how they construct each
+document map.
+
+| System | What it does |
+| --- | --- |
+| `flat_vector` | Baseline. Searches raw passages across the whole case without maps or document routing. |
+| `stuffing` | Sends the whole document to the map builder in one call when it fits the context limit. |
+| `map_reduce` | Maps document parts independently, then merges those partial maps. |
+| `refine` | Reads passages in order and updates one evolving map after each passage. |
+| `hierarchical_map` | Builds small maps, then combines them through several levels. |
+| `outline_then_fill` | Creates a document outline first, then fills its sections from the source. |
+| `agentic_map` | Uses a bounded inspect-and-revise loop to find and fill missing coverage. |
+
+The system interface is deliberately small: build an index, then answer a benchmark
+question from that index. See
+[`src/long_document_indexing/systems/base.py`](src/long_document_indexing/systems/base.py).
+
+## What the Benchmark Measures
+
+The extended comparison uses:
+
+- 20 Multi-LexSum legal case files;
+- 60 hand-curated questions;
+- 20 single-document questions;
+- 20 multi-document questions;
+- 20 chained multi-document questions;
+- 7 retrieval systems, producing 420 answer runs.
+
+Each question includes an expected answer and labels for the documents, passages, and
+quotes needed to answer it. These labels let the benchmark measure retrieval directly,
+instead of treating answer wording as a substitute for retrieval quality.
+
+The benchmark lives in
+[`benchmarks/multilexsum/rag-qa-extended.jsonl`](benchmarks/multilexsum/rag-qa-extended.jsonl).
+The selected cases and dataset revision are recorded in
+[`benchmarks/multilexsum/rag-qa-extended-case-manifest.json`](benchmarks/multilexsum/rag-qa-extended-case-manifest.json).
+
+### Primary Retrieval Metrics
+
+| Metric | Plain-language question |
+| --- | --- |
+| `document_recall_at_3` | Did the system's first three document choices include the gold documents? |
+| `required_document_coverage` | When several documents were required, how much of that required set was selected? |
+| `context_precision_at_4` | How many of the first four retrieved passages were actually relevant? |
+| `context_recall_at_4` | How much of the labeled passage evidence appeared in the first four results? |
+| `evidence_quote_recall_at_4` | How much of the expected quoted evidence was recovered? |
+
+These are the main metrics for answering whether document maps improve retrieval.
+
+### Supporting Metrics
+
+The repository also measures citation validity and support, map validity, latency, model
+calls, and token use. Foundry model judges can score groundedness, relevance, retrieval,
+document retrieval, and response completeness.
+
+Answer-to-reference token overlap is included as a secondary check. It is sensitive to
+wording and prompt choices, so it should not be presented as direct evidence that one
+retriever is better.
+
+## Try It Locally
+
+Requirements:
+
+- Python 3.12 or 3.13;
+- [`uv`](https://docs.astral.sh/uv/).
+
+Install the development dependencies:
 
 ```bash
 uv sync --python 3.13 --extra dev
-uv run --python 3.13 --no-editable --reinstall-package long-document-indexing ldi run --config configs/experiments/smoke-test.yaml
+```
+
+Run all seven systems on the small deterministic fixture:
+
+```bash
+uv run --python 3.13 --no-editable \
+  --reinstall-package long-document-indexing \
+  ldi run --config configs/experiments/advanced-systems-smoke.yaml
+```
+
+This run uses local fake models, so it gives the same results each time and does not
+require Azure credentials or paid model calls. It exercises the same indexing, query,
+metric, and reporting code used by the real experiment.
+
+Run the tests:
+
+```bash
 uv run --python 3.13 --extra dev pytest
 ```
 
-The smoke run writes artifacts under `artifacts/`, which is ignored by git.
+Generated files are written under `artifacts/`, which is ignored by git.
 
-The CLI command uses `--no-editable` because some macOS Python 3.13 environments skip editable-install `.pth` files inside hidden virtualenv directories. The explicit package reinstall keeps the console script aligned with local source changes while the repo is under active development. Tests still run against `src/` through pytest configuration.
+## Run the Legal Benchmark
 
-## Current Shape
+The legal benchmark uses paid Azure OpenAI deployments. Start with the two-case smoke
+configuration before running the 20-case comparison.
 
-The default path is still local and deterministic: `generator_provider: fake` runs without Azure credentials and exercises the same orchestration, metric, reporting, and export code used by real-model experiments. The legacy lexical backend is available only when a system explicitly selects `retrieval_backend: local_vector`.
+### 1. Create the model deployments
 
-The real-model path is optional. Foundry/Azure OpenAI generation and embeddings are isolated behind `TextGenerationClient` and `EmbeddingClient`. Mapped systems send complete normalized maps to a shared structured-output LLM router, then use the same dense backend to retrieve raw source segments from the selected documents. API-key inference does not require Azure CLI login.
+The configuration separates five model roles. Environment values must be the names of
+deployments that already exist in your Azure resource.
 
-The Foundry evaluation path is split deliberately. Local export writes JSONL datasets under ignored `artifacts/`; managed evaluation uses the Azure AI Evaluation SDK when requested. Logging managed results to a Foundry project requires a project endpoint and may require `az login`. `azd` is only needed for provisioning or hosted-agent workflows.
-
-The RAG evaluation path is intentionally concrete: use labeled questions with
-`relevant_document_ids`, `relevant_segment_ids`, and evidence quotes. Local metrics then
-score route quality, retrieved context quality, evidence quote recovery, citation target
-validity, and citation quote support. ROUGE/F1-style reference overlap remains useful as a
-secondary answer check, but it is not the primary RAG signal.
-
-## Implemented Systems
-
-The repo now has seven comparable systems:
-
-| System | Config id | Role |
+| Role | Environment variable | Model used in the reference run |
 | --- | --- | --- |
-| Flat vector baseline | `flat_vector` | Dense semantic retrieval over raw source segments without document maps. |
-| Stuffing map | `stuffing` | One map from the full document when it fits the context budget. |
-| Map-reduce map | `map_reduce` | Segment maps reduced into one document map. |
-| Refine map | `refine` | Sequential map revision over ordered segments. |
-| Hierarchical map | `hierarchical_map` | Leaf maps reduced through a bounded hierarchy. |
-| Outline-then-fill map | `outline_then_fill` | Plan an outline, then fill outline nodes from source segments. |
-| Agentic map | `agentic_map` | Bounded inspect-and-revise loop with coverage metadata. |
+| Map builder | `FOUNDRY_GENERATOR_DEPLOYMENT` | GPT-5 mini |
+| Document router | `FOUNDRY_ROUTER_MODEL` | GPT-5 mini |
+| Answer writer | `FOUNDRY_ANSWER_MODEL` | GPT-5 mini |
+| Evaluation judge | `FOUNDRY_JUDGE_MODEL` | GPT-5 |
+| Passage embeddings | `FOUNDRY_EMBEDDING_MODEL` | text-embedding-3-large |
 
-Run all seven on the local smoke fixture:
+The role variables may point to the same deployment, but they do not have to. Separate
+names make the experiment and its costs easier to inspect.
 
-```bash
-uv run --python 3.13 --no-editable --reinstall-package long-document-indexing ldi run --config configs/experiments/advanced-systems-smoke.yaml
-```
-
-Run all seven on the synthetic enterprise fixture:
+### 2. Configure the local environment
 
 ```bash
-uv run --python 3.13 --no-editable --reinstall-package long-document-indexing ldi run --config configs/experiments/enterprise-advanced-thin-slice.yaml
+cp .env.example .env
 ```
 
-## Real Model Client
+Fill in `.env` with your endpoint, API key, deployment names, and Foundry project
+endpoint. Do not commit `.env`.
 
-Milestone 4 adds a thin OpenAI-compatible client for Microsoft Foundry/Azure OpenAI inference endpoints. Milestone 6 adds a Responses API path with Pydantic-backed structured outputs for GPT-5-family deployments. The real client is optional; the default smoke test still uses `generator_provider: fake`.
-
-Install the optional dependencies only when running against a real deployment:
+Install the optional dependencies:
 
 ```bash
-uv sync --python 3.13 --extra dev --extra foundry
+uv sync --python 3.13 --extra dev --extra foundry --extra multilexsum
 ```
 
-Set real model values through environment variables or a local `.env` file:
+API-key inference does not require Azure CLI login. Publishing results to the Foundry
+portal uses your Azure identity and may require `az login`.
+
+### 3. Run the two-case smoke benchmark
 
 ```bash
-export FOUNDRY_GENERATOR_BASE_URL="https://<resource>.openai.azure.com/openai/v1/"
-export FOUNDRY_GENERATOR_DEPLOYMENT="<deployment-name>"
-export FOUNDRY_GENERATOR_API="responses"
-export FOUNDRY_GENERATOR_MAX_OUTPUT_TOKENS="2000"
-export FOUNDRY_GENERATOR_RESPONSE_FORMAT="structured"
-export AZURE_INFERENCE_CREDENTIAL="<api-key>"
+uv run --python 3.13 --extra foundry --extra multilexsum \
+  --no-editable --reinstall-package long-document-indexing \
+  ldi run \
+  --config configs/experiments/foundry-multilexsum-legal-rag-qa-role-separated-smoke.yaml
 ```
 
-`FOUNDRY_GENERATOR_BASE_URL` should be the base `/openai/v1/` endpoint. If a copied endpoint ends in `/responses` or `/chat/completions`, the client normalizes it back to the base URL before creating the SDK client.
+Use this run to verify the endpoint, deployments, quotas, structured outputs, embeddings,
+and report generation before spending money on the extended run.
 
-`FOUNDRY_GENERATOR_RESPONSE_FORMAT=structured` is the recommended GPT-5 path. It uses the OpenAI SDK `responses.parse(..., text_format=...)` flow so Pydantic generates the schema and parses the result. `json_object` remains available only as a compatibility fallback.
+### 4. Preview and run the 20-case comparison
 
-With `generator_auth_mode: api_key`, Azure CLI login is not required. Azure login is only needed if you switch the config to `generator_auth_mode: azure_default_credential` or start provisioning/managing Azure resources.
-
-Real-model configs include `run_control.resume: true` and a conservative `max_model_calls` cap. Completed index artifacts and successful query records are reused on rerun. Use `--force` only when you intentionally want to spend calls again.
-
-Then run the real-client stuffing smoke config:
+First inspect what will be reused, rebuilt, or queried:
 
 ```bash
-uv run --python 3.13 --extra foundry --no-editable --reinstall-package long-document-indexing ldi run --config configs/experiments/foundry-stuffing-smoke.yaml
+uv run --python 3.13 --extra foundry --extra multilexsum \
+  --no-editable --reinstall-package long-document-indexing \
+  ldi run \
+  --config configs/experiments/foundry-multilexsum-legal-rag-qa-role-separated-extended.yaml \
+  --dry-run-budget
 ```
 
-## Answer Generation
-
-The default query path is extractive: it builds answers by stitching retrieved source snippets. This keeps local smoke tests deterministic.
-
-Milestone 7 adds optional model-backed answer generation:
-
-```yaml
-answering:
-  mode: generated
-```
-
-Generated answers use the same `TextGenerationClient` and Pydantic structured-output flow as document-map generation. The model returns answer text plus citations, and the repo validates that every citation points to retrieved evidence.
-
-Run the generated-answer smoke config after configuring the real model `.env` values:
+Then run it:
 
 ```bash
-uv run --python 3.13 --extra foundry --no-editable --reinstall-package long-document-indexing ldi run --config configs/experiments/foundry-generated-answer-smoke.yaml
+uv run --python 3.13 --extra foundry --extra multilexsum \
+  --no-editable --reinstall-package long-document-indexing \
+  ldi run \
+  --config configs/experiments/foundry-multilexsum-legal-rag-qa-role-separated-extended.yaml
 ```
 
-## Foundry Evaluation Export
+The run writes checkpoints as it progresses. Repeating the same command reuses valid
+indexes and successful answers, and retries missing or failed work. If an existing
+artifact no longer matches the current inputs, the command stops before paying to replace
+it. Review `--dry-run-budget`, then use `--allow-stale-recompute` only when that rebuild is
+intentional. `--force` rebuilds everything.
 
-Milestone 8 exports benchmark run records into a Foundry-ready JSONL dataset. The export includes the standard single-turn fields `query`, `response`, `context`, and `ground_truth`, plus inspectable metadata for systems, citations, retrieved chunks, selected documents, and document-retrieval labels.
+The configured model-call and token limits are safety ceilings. They are not estimates of
+the amount the run should consume.
 
-Enable automatic export during `ldi evaluate`:
+## Evaluate and Inspect the Results
 
-```yaml
-evaluation:
-  foundry:
-    enabled: true
-    dataset_path: evaluations/foundry/dataset.jsonl
-    manifest_path: evaluations/foundry/manifest.json
-    evaluation_level: turn
-```
+The main `ldi run` command already computes deterministic local metrics and writes the
+report. The two following commands add different Foundry workflows.
 
-You can also export from existing run artifacts:
+### Run Foundry model judges
+
+Preview the managed evaluation:
 
 ```bash
-uv run --python 3.13 --no-editable --reinstall-package long-document-indexing ldi export-foundry-eval --config configs/experiments/foundry-eval-export-smoke.yaml
+uv run --python 3.13 --extra foundry --extra multilexsum \
+  --no-editable --reinstall-package long-document-indexing \
+  ldi evaluate-foundry-managed \
+  --config configs/experiments/foundry-multilexsum-legal-rag-qa-role-separated-extended.yaml \
+  --dry-run
 ```
 
-This milestone does not run a cloud evaluation. Azure login is not required for the local export.
-
-## Foundry Managed Evaluation
-
-Milestone 13 adds a thin Azure AI Evaluation SDK execution path over the exported JSONL dataset. Inspect the exact SDK call shape first:
+Run it:
 
 ```bash
-uv run --python 3.13 --extra foundry --no-editable --reinstall-package long-document-indexing ldi evaluate-foundry-managed --config configs/experiments/enterprise-thin-slice.yaml --dry-run
+uv run --python 3.13 --extra foundry --extra multilexsum \
+  --no-editable --reinstall-package long-document-indexing \
+  ldi evaluate-foundry-managed \
+  --config configs/experiments/foundry-multilexsum-legal-rag-qa-role-separated-extended.yaml
 ```
 
-The dry run writes `evaluations/foundry/managed-plan.json` and makes no cloud call. To log results to a Foundry project, set the project endpoint:
+The extended config judges the same deterministic 20% sample for every system. It
+checkpoints each system/evaluator pair, so a retry can reuse completed work.
+
+### Publish seven comparable runs to Foundry
+
+Preview the publication plan:
 
 ```bash
-export FOUNDRY_EVALUATION_PROJECT_ENDPOINT="https://<resource>.services.ai.azure.com/api/projects/<project-name>"
-uv run --python 3.13 --extra foundry --no-editable --reinstall-package long-document-indexing ldi evaluate-foundry-managed --config configs/experiments/enterprise-thin-slice.yaml
+uv run --python 3.13 --extra foundry --extra multilexsum \
+  --no-editable --reinstall-package long-document-indexing \
+  ldi publish-foundry-evals \
+  --config configs/experiments/foundry-multilexsum-legal-rag-qa-role-separated-extended.yaml \
+  --evaluation-name ldi-multilexsum-legal-rag-qa-extended \
+  --run-name rag-qa-role-separated-extended-visible \
+  --dry-run
 ```
 
-The default managed evaluators are `f1` and `rouge`, which score `response` against `ground_truth`. For RAG-labeled datasets, configure managed evaluators such as `groundedness`, `relevance`, `retrieval`, `document_retrieval`, and `response_completeness`; these consume the exported `query`, `response`, `context`, `retrieved_documents`, `retrieval_ground_truth`, and `ground_truth` fields. Model-judge evaluators use `models.judge_deployment` when set, otherwise `models.generator_deployment`, plus the normalized `models.generator_base_url`.
+Remove `--dry-run` to publish. The command creates one 60-row Foundry run for each
+system, making the seven systems directly comparable in the Foundry Evaluations table.
+Rerunning the same names reuses completed, unchanged systems.
 
-Use `.env` for local settings:
+Managed evaluation and portal publication are separate:
 
-```bash
-FOUNDRY_EVALUATION_PROJECT_ENDPOINT="https://<resource>.services.ai.azure.com/api/projects/<project-name>"
-FOUNDRY_GENERATOR_BASE_URL="https://<resource>.services.ai.azure.com/openai/v1/"
-FOUNDRY_GENERATOR_DEPLOYMENT="<deployment-name>"
-AZURE_INFERENCE_CREDENTIAL="<api-key>"
-# Optional override when the judge deployment is a GPT-5/o-series reasoning model.
-FOUNDRY_EVALUATION_REASONING_MODEL="true"
-```
+- `evaluate-foundry-managed` runs model-based evaluators and saves their results locally.
+- `publish-foundry-evals` publishes the deterministic benchmark metrics as visible,
+  system-by-system Foundry runs.
 
-When `models.judge_deployment` or `models.generator_deployment` looks like a GPT-5/o-series deployment, the managed-evaluation adapter marks Azure AI Evaluation SDK model judges as reasoning models. This makes the SDK use the parameter shape those models require. Set `FOUNDRY_EVALUATION_REASONING_MODEL=true` or `false` in `.env` only when you need to override auto-detection.
+## Where to Find the Output
 
-The SDK's batch logs use "lines" to mean dataset rows. For example, `Finished 22 / 28 lines` means one evaluator has scored 22 of 28 exported rows. If multiple evaluator names advance at the same timestamp, the SDK is running evaluator batches concurrently.
-
-For RAG judge runs on adequately provisioned judge deployments, use concurrent evaluator execution:
-
-```yaml
-evaluation:
-  foundry:
-    managed_execution: parallel
-    managed_evaluator_delay_seconds: 0
-```
-
-This calls the Azure AI Evaluation SDK once with all configured evaluators. It is the faster path and matches the default RAG smoke configuration.
-
-For RAG judge runs on low quota deployments, switch to sequential evaluator execution:
-
-```yaml
-evaluation:
-  foundry:
-    managed_execution: sequential
-    managed_evaluator_delay_seconds: 5
-    managed_max_attempts: 4
-    managed_retry_delay_seconds: 30
-    fail_on_evaluator_errors: true
-```
-
-Sequential execution calls the SDK once per evaluator and merges the resulting metrics into the normal managed-result artifact. Each evaluator is retried with exponential backoff and checkpointed only after every dataset row completes. Rerunning the same command reuses valid evaluator checkpoints. A partial result is never written as the final `managed-result.json`.
-
-This reduces the largest request burst, though the SDK may still parallelize rows inside a single evaluator. If the SDK asks for Azure authentication when logging to a project, run `az login`. `azd` is only needed for provisioning or Foundry hosted-agent workflows, not for local export or dry-run planning. GPT-5-family judge runs can still hit Azure rate limits; retries may make managed evaluation slower.
-
-## Foundry Portal Evals
-
-The Azure AI Evaluation SDK can upload completed evaluation results, but those uploaded runs may not appear as top-level rows in the Foundry Evaluations page. To create a portal-visible Foundry Evals parent and run from the exported JSONL dataset, use:
-
-```bash
-uv run --python 3.13 --extra foundry --no-editable --reinstall-package long-document-indexing ldi publish-foundry-evals --config configs/experiments/enterprise-thin-slice.yaml --dry-run
-uv run --python 3.13 --extra foundry --no-editable --reinstall-package long-document-indexing ldi publish-foundry-evals --config configs/experiments/enterprise-thin-slice.yaml
-```
-
-This command reads `FOUNDRY_EVALUATION_PROJECT_ENDPOINT` from `.env`, uses the current Azure CLI login through `DefaultAzureCredential`, uploads an Evals-shaped JSONL file, and creates one Foundry Evals run per system. It checkpoints an in-flight run's remote IDs, retries transient failures, rejects errored or incomplete rows, verifies every expected grader result, and writes per-system results plus `evaluations/foundry/openai-evals-system-results.json`.
-
-Rerun the exact same command, evaluation name, and run name after an interruption. Completed systems whose exported data is unchanged are reused; only missing or invalid systems are published again.
-
-Use this portal-visible path whenever the goal is to inspect results in the Foundry Evaluations UI. It maps configured `managed_evaluators` to native Evals criteria: `f1` becomes deterministic token-F1, `rouge` becomes ROUGE-1 text similarity, and RAG evaluator names become deterministic Python graders over the exported RAG fields:
-
-- `groundedness` -> `citation_support_rate`
-- `relevance` -> `answer_reference_token_f1`
-- `retrieval` -> `context_precision_at_4`, `context_recall_at_4`, `evidence_quote_recall_at_4`
-- `document_retrieval` -> `document_retrieval_precision`, `document_retrieval_recall`
-- `response_completeness` -> `answer_reference_token_recall`
-
-Keep `ldi evaluate-foundry-managed` for backend SDK scoring and local artifacts. Do not rely on it for Foundry UI visibility.
-
-For benchmark presentation, publish one Foundry run per system so the Foundry run table compares systems directly:
-
-```bash
-uv run --python 3.13 --extra foundry --extra multilexsum --no-editable --reinstall-package long-document-indexing ldi publish-foundry-evals --config configs/experiments/foundry-multilexsum-legal-rag-qa-smoke.yaml --evaluation-name ldi-multilexsum-legal-rag-qa-system-comparison --run-name legal-rag-smoke
-```
-
-This creates one run per `system_id`, named like `legal-rag-smoke-map_reduce`, `legal-rag-smoke-refine`, and so on. The Foundry publishing path is intentionally system-by-system because the benchmark exists to compare long-document indexing strategies.
-
-## Multi-System Real Benchmark
-
-Milestone 9 runs the real GPT-5-family generator across all implemented systems on the smoke corpus:
-
-```bash
-uv run --python 3.13 --extra foundry --no-editable --reinstall-package long-document-indexing ldi run --config configs/experiments/foundry-multi-system-real-smoke.yaml
-```
-
-This config compares `flat_vector`, `stuffing`, `map_reduce`, and `refine` with `answering.mode: generated` and Foundry evaluation export enabled. On the bundled smoke corpus, it performs 12 document-map generation calls and 8 generated-answer calls. The run writes local metrics, usage JSONL files, a Markdown/CSV report, and a Foundry-ready evaluation dataset under `artifacts/foundry-multi-system-real-smoke/`.
-
-Azure login is not required for this API-key based run. Configure `FOUNDRY_GENERATOR_BASE_URL`, `FOUNDRY_GENERATOR_DEPLOYMENT`, and `AZURE_INFERENCE_CREDENTIAL` before running it.
-
-## Multi-LexSum Legal Benchmark
-
-The legal branch adds Multi-LexSum case-file support for longer, multi-document legal corpora. The selected thin slice uses 5 Civil Rights Litigation Clearinghouse cases, 32 source documents, and 186 source segments.
-
-Run the resumable development benchmark:
-
-```bash
-uv run --python 3.13 --extra foundry --extra multilexsum --no-editable --reinstall-package long-document-indexing ldi run --config configs/experiments/foundry-multilexsum-legal-thin-slice.yaml
-```
-
-Run the clean all-systems benchmark for blog/report tables:
-
-```bash
-uv run --python 3.13 --extra foundry --extra multilexsum --no-editable --reinstall-package long-document-indexing ldi run --config configs/experiments/foundry-multilexsum-legal-clean-all-systems.yaml
-```
-
-Both configs use API-key auth, so Azure CLI login is not required. They enable resume and checkpoint reuse because real legal runs can span many model calls. Map artifacts record prompt-safety and source-reference normalization policy versions; stale map artifacts are rebuilt instead of silently reused.
-
-For proper legal RAG evaluation, use the curated QA overlay:
-
-```bash
-uv run --python 3.13 --extra foundry --extra multilexsum --no-editable --reinstall-package long-document-indexing ldi run --config configs/experiments/foundry-multilexsum-legal-rag-qa-smoke.yaml
-```
-
-This config uses evidence-labeled questions rather than whole-case summary prompts, so
-its report includes context precision/recall, evidence quote recall, citation precision,
-citation recall, and citation support rate.
-
-Run the fixed 20-case, 60-question comparison after the smoke run succeeds:
-
-```bash
-uv run --python 3.13 --extra foundry --extra multilexsum --no-editable --reinstall-package long-document-indexing ldi run --config configs/experiments/foundry-multilexsum-legal-rag-qa-role-separated-extended.yaml --dry-run-budget
-uv run --python 3.13 --extra foundry --extra multilexsum --no-editable --reinstall-package long-document-indexing ldi run --config configs/experiments/foundry-multilexsum-legal-rag-qa-role-separated-extended.yaml
-```
-
-Always inspect the dry-run output before the paid command. It reports reusable, stale,
-failed, and missing index/query units plus a guarded estimate for remaining query usage.
-Normal resume retries failed or missing work, but fails before replacing a stale index or
-previously successful query. `--allow-stale-recompute` is the explicit, paid override
-when that replacement is intentional.
-
-Long runs report the current system, case, document, and question; checkpoint and
-artifact reuse; routing, embedding, map-building, and answering calls; and a heartbeat
-every 60 seconds while waiting for a remote model response. These messages are
-observational only and do not change execution, retry, checkpoint, or budget behavior.
-
-The extended config compares all seven systems and exports 420 rows. Its managed
-evaluation takes the same deterministic 20% question sample for every system: four
-single-document, four multi-document, and four chained multi-document questions, or 84
-judged rows total. It runs and
-checkpoints each evaluator separately for each system, so rerunning after a connection
-error reuses completed system/evaluator pairs. Each SDK call contains one evaluator and
-twelve rows, with evaluator errors configured to fail and retry that small unit.
-Before making any Foundry call, the managed evaluator rejects failed runs or rows with
-empty fields and identifies the affected system/question pairs locally.
-
-Preview and run the sampled managed evaluation:
-
-```bash
-uv run --python 3.13 --extra foundry --extra multilexsum --no-editable --reinstall-package long-document-indexing ldi evaluate-foundry-managed --config configs/experiments/foundry-multilexsum-legal-rag-qa-role-separated-extended.yaml --dry-run
-uv run --python 3.13 --extra foundry --extra multilexsum --no-editable --reinstall-package long-document-indexing ldi evaluate-foundry-managed --config configs/experiments/foundry-multilexsum-legal-rag-qa-role-separated-extended.yaml
-```
-
-Publish all 420 deterministic RAG-metric rows as seven comparable Foundry runs:
-
-```bash
-uv run --python 3.13 --extra foundry --extra multilexsum --no-editable --reinstall-package long-document-indexing ldi publish-foundry-evals --config configs/experiments/foundry-multilexsum-legal-rag-qa-role-separated-extended.yaml --evaluation-name ldi-multilexsum-legal-rag-qa-extended --run-name rag-qa-role-separated-extended-visible
-```
-
-The model-role values in `.env` are Azure deployment names and must match existing
-deployments exactly. The expected roles are map builder, router, answerer, judge, and
-embeddings. API-key inference uses `AZURE_INFERENCE_CREDENTIAL`; portal publication also
-uses the Azure CLI identity, so run `az login` first if needed.
-
-## Enterprise Thin Slice Benchmark
-
-Milestone 11 adds a larger local benchmark fixture under `benchmarks/enterprise/`. It is synthetic and versioned in the repo: 8 documents, 24 source segments, and 16 gold-labeled questions covering policy, incident, launch, budget, training, audit, and escalation notes.
-
-Run the deterministic all-system slice without Azure credentials:
-
-```bash
-uv run --python 3.13 --no-editable --reinstall-package long-document-indexing ldi run --config configs/experiments/enterprise-thin-slice.yaml
-```
-
-This compares `flat_vector`, `stuffing`, `map_reduce`, and `refine` with generated answers from the deterministic fake generator, local metrics, usage summaries, report files, and a Foundry-ready evaluation export.
-
-After configuring the real model `.env` values, run the optional GPT-5-family stuffing-only slice:
-
-```bash
-uv run --python 3.13 --extra foundry --no-editable --reinstall-package long-document-indexing ldi run --config configs/experiments/foundry-enterprise-stuffing-thin-slice.yaml
-```
-
-That config is intentionally limited to `stuffing` to cap live model calls while exercising the same larger dataset and export path. With API-key auth, Azure login is not required.
-
-## Resumable And Budgeted Runs
-
-Milestone 12 adds run-control safety for real-model experiments:
-
-```yaml
-run_control:
-  resume: true
-  max_model_calls: 24
-  max_total_tokens: 50000
-```
-
-`resume: true` reuses valid index artifacts and successful query records. Failed or
-skipped query records are retried. Existing work with a stale signature is never replaced
-implicitly. `max_model_calls`, `max_input_tokens`, `max_output_tokens`,
-`max_total_tokens`, and `max_estimated_cost` are enforced against recorded usage. When
-prior successful rows provide an estimate, the runner reserves a 1.25x margin and stops
-before starting a phase that is unlikely to fit the remaining budget.
-
-CLI flags can override the config for one command:
-
-```bash
-uv run --python 3.13 --no-editable --reinstall-package long-document-indexing ldi run --config configs/experiments/enterprise-thin-slice.yaml --resume
-uv run --python 3.13 --no-editable --reinstall-package long-document-indexing ldi run --config configs/experiments/enterprise-thin-slice.yaml --force
-uv run --python 3.13 --no-editable --reinstall-package long-document-indexing ldi run --config configs/experiments/enterprise-thin-slice.yaml --resume --allow-stale-recompute
-uv run --python 3.13 --no-editable --reinstall-package long-document-indexing ldi run --config configs/experiments/enterprise-thin-slice.yaml --dry-run-budget
-```
-
-`--force` intentionally rebuilds everything. `--allow-stale-recompute` is narrower: it
-permits resume to replace only existing units whose provenance no longer matches.
-
-The runner writes index artifacts, run records, checkpoints, and usage ledgers
-incrementally using atomic file replacement. Budget exhaustion stops without overwriting
-pending records. A query phase containing any failed, skipped, missing, or empty result
-returns a nonzero exit and cannot be exported to Foundry. Foundry commands regenerate and
-validate the local export before making remote calls, preventing stale datasets from being
-published.
-
-## Reporting
-
-`ldi report` writes a compact analysis bundle under each experiment's `report/` directory:
+Each experiment writes to `artifacts/<experiment-id>/`:
 
 ```text
-report/results.md
-report/results.csv
-report/confidence-intervals.csv
-report/system-summary.csv
-report/usage-summary.csv
-report/summary.json
+artifacts/<experiment-id>/
+  indexes/                 built dense indexes and document maps
+  runs/                    one normalized answer record per system and question
+  evaluations/
+    local-metrics.jsonl    deterministic metric records
+    foundry/               exported datasets, plans, checkpoints, and results
+  report/
+    results.md             readable metric tables
+    results.csv            metric means
+    confidence-intervals.csv
+    system-summary.csv     one comparison row per system
+    usage-summary.csv      model calls and tokens by system
+    summary.json           complete report data
 ```
 
-`results.csv` remains the simple metric mean table for compatibility. `confidence-intervals.csv` adds deterministic case-cluster bootstrap 95% confidence intervals for every local metric mean, so questions from the same case are resampled together. `system-summary.csv` adds quality, routing, retrieval, answer, map, latency, token, model-call, and issue columns. `usage-summary.csv` aggregates index/query usage by system and event kind. `summary.json` preserves the complete typed report bundle for scripts or notebooks.
+Start with `report/results.md` for a readable summary and `report/system-summary.csv` for
+cross-system analysis. Inspect `indexes/<system>/maps/` to see the actual generated maps,
+and `runs/<system>.jsonl` to trace a question through selected documents, retrieved
+passages, answer text, and citations.
 
-## MAF Workflow Runner
+## Repository Guide
 
-Milestone 5 adds an optional Microsoft Agent Framework functional workflow runner. It does not require Azure resources when used with the fake generator.
+| Path | What it contains |
+| --- | --- |
+| `benchmarks/` | Versioned questions, labels, smoke data, and case manifests. |
+| `configs/experiments/` | Complete experiment definitions. |
+| `configs/systems/` | Settings for each retrieval and map-building method. |
+| `prompts/` | Prompts used to build maps, route questions, and answer. |
+| `src/long_document_indexing/datasets/` | Dataset loaders and validation. |
+| `src/long_document_indexing/systems/` | The seven systems being compared. |
+| `src/long_document_indexing/retrieval/` | Dense and local retrieval backends. |
+| `src/long_document_indexing/evaluation/` | Local metrics and Foundry integration. |
+| `src/long_document_indexing/reporting.py` | Markdown, CSV, and JSON reports. |
+| `tests/` | Unit and integration tests. |
 
-```bash
-uv sync --python 3.13 --extra dev --extra maf
-uv run --python 3.13 --extra maf --no-editable --reinstall-package long-document-indexing ldi run --config configs/experiments/maf-stuffing-smoke.yaml
-```
+For a code-level tour, continue with
+[`docs/repo-walkthrough.md`](docs/repo-walkthrough.md). For details about the legal
+questions and dataset licensing, read
+[`benchmarks/multilexsum/README.md`](benchmarks/multilexsum/README.md).
+
+## Scope and Safety
+
+This is an experimental benchmark, not a production legal research system. It is built
+to compare retrieval strategies under controlled conditions.
+
+For long paid runs, it provides:
+
+- incremental checkpoints and writes that do not leave half-written files;
+- retries for transient model and embedding failures;
+- compatibility checks that prevent silent reuse of out-of-date files;
+- explicit model-call and token ceilings;
+- validation that blocks incomplete runs from being evaluated or published;
+- source IDs on map entries, retrieved passages, and citations.
+
+These controls make interrupted experiments recoverable and results inspectable. They do
+not make model output legally authoritative.
