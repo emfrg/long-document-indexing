@@ -59,7 +59,7 @@ The YAML is parsed and validated by
 [`config.py`](../src/long_document_indexing/config.py). The model values in the
 reference config resolve to Azure deployment names supplied through environment
 variables, normally loaded from `.env`. See the
-[README setup section](../README.md#run-the-legal-benchmark) and
+[Run the Legal Benchmark](../README.md#run-the-legal-benchmark) and
 [`.env.example`](../.env.example) for the required values.
 
 ## 2. Cases and Questions
@@ -73,7 +73,7 @@ Segment  = one passage cut from that document
 ```
 
 The shared definitions are in
-[`domain/corpus.py`](../src/long_document_indexing/domain/corpus.py). The
+[`corpus.py`](../src/long_document_indexing/domain/corpus.py). The
 [`MultiLexSumDatasetAdapter`](../src/long_document_indexing/datasets/multilexsum.py)
 loads the fixed Multi-LexSum revision named in the experiment, selects the configured
 cases, and creates stable document and segment IDs.
@@ -82,11 +82,11 @@ The 60 questions are stored in
 [`rag-qa-extended.jsonl`](../benchmarks/multilexsum/rag-qa-extended.jsonl). Each line
 contains one question and the information needed to score it later: the expected
 answer, required documents, required passages, and supporting quotes. The
-[`case manifest`](../benchmarks/multilexsum/rag-qa-extended-case-manifest.json) records
+[case manifest](../benchmarks/multilexsum/rag-qa-extended-case-manifest.json) records
 the 20 case IDs and the exact dataset revision used for their source documents.
 
 The fields required for each loaded question are defined by `BenchmarkItem` in
-[`domain/benchmark.py`](../src/long_document_indexing/domain/benchmark.py). After
+[`benchmark.py`](../src/long_document_indexing/domain/benchmark.py). After
 loading, the rest of the repository works with the same `Corpus` and `BenchmarkItem`
 objects regardless of where the data came from.
 
@@ -109,7 +109,7 @@ controlled comparison.
 ## 4. Building the Indexes
 
 Every retrieval system implements the two operations defined by `RagSystem` in
-[`systems/base.py`](../src/long_document_indexing/systems/base.py):
+[`base.py`](../src/long_document_indexing/systems/base.py):
 
 1. `build_index` prepares one case for retrieval and returns an `IndexArtifact` that
    records where the resulting files were saved.
@@ -155,7 +155,7 @@ Their implementations are in
 behavior is in
 [`map_base.py`](../src/long_document_indexing/systems/map_base.py). Every completed map
 uses the common `DocumentMap` and `MapEntry` structures defined in
-[`domain/maps.py`](../src/long_document_indexing/domain/maps.py).
+[`maps.py`](../src/long_document_indexing/domain/maps.py).
 
 Indexing results are saved after each case. Several map-building strategies also save
 intermediate checkpoints while processing long documents. When `--resume` is used, the
@@ -228,7 +228,7 @@ the corresponding document and passage IDs to that citation.
 ## 6. The Standard Run Record
 
 Every system writes the result of one question as a `RagRunRecord`, defined in
-[`domain/runs.py`](../src/long_document_indexing/domain/runs.py). It contains:
+[`runs.py`](../src/long_document_indexing/domain/runs.py). It contains:
 
 | Field group | Contents |
 | --- | --- |
@@ -249,9 +249,9 @@ compare all seven systems.
 quotes from the question set. It calculates the configured local metrics directly,
 without a judge model. It also reads the saved index artifacts when calculating
 map-construction metrics. The metric implementations are in
-[`evaluation/local/`](../src/long_document_indexing/evaluation/local), and their common
+[`local/`](../src/long_document_indexing/evaluation/local), and their common
 runner is
-[`evaluation/runner.py`](../src/long_document_indexing/evaluation/runner.py).
+[`runner.py`](../src/long_document_indexing/evaluation/runner.py).
 
 The results answer three kinds of question:
 
@@ -261,8 +261,8 @@ The results answer three kinds of question:
 3. **Supporting checks:** Were maps valid, citations supported, answers complete, and
    the runtime and token use acceptable?
 
-The [README metric tables](../README.md#what-the-benchmark-measures) define every metric
-reported by the reference experiment.
+The [What the Benchmark Measures](../README.md#what-the-benchmark-measures) section
+defines every metric reported by the reference experiment.
 
 When Foundry evaluation is enabled, `ldi evaluate` also exports the completed run
 records as a 420-row evaluation dataset. Two later commands use that export for
@@ -358,24 +358,24 @@ run the lifecycle phases separately with `ldi prepare`, `ldi index`, `ldi query`
 
 | If you want to understand or change... | Start here |
 | --- | --- |
-| Experiment settings | [`configs/experiments/`](../configs/experiments) |
-| Per-system settings | [`configs/systems/`](../configs/systems) |
-| Multi-LexSum loading and chunking | [`datasets/multilexsum.py`](../src/long_document_indexing/datasets/multilexsum.py) |
+| Experiment settings | [`experiments/`](../configs/experiments) |
+| Per-system settings | [`systems/`](../configs/systems) |
+| Multi-LexSum loading and chunking | [`multilexsum.py`](../src/long_document_indexing/datasets/multilexsum.py) |
 | Corpus, question, map, and run data definitions | [`domain/`](../src/long_document_indexing/domain) |
 | A map-construction strategy | [`systems/`](../src/long_document_indexing/systems) |
-| Shared map routing and retrieval | [`systems/map_base.py`](../src/long_document_indexing/systems/map_base.py) |
+| Shared map routing and retrieval | [`map_base.py`](../src/long_document_indexing/systems/map_base.py) |
 | Router requests and responses | [`routing.py`](../src/long_document_indexing/routing.py) |
-| Dense passage indexing and search | [`retrieval/dense_vector.py`](../src/long_document_indexing/retrieval/dense_vector.py) |
+| Dense passage indexing and search | [`dense_vector.py`](../src/long_document_indexing/retrieval/dense_vector.py) |
 | Answer generation and citation validation | [`answering.py`](../src/long_document_indexing/answering.py) |
-| Deterministic metrics | [`evaluation/local/`](../src/long_document_indexing/evaluation/local) |
-| Foundry evaluation and publication | [`evaluation/foundry/`](../src/long_document_indexing/evaluation/foundry) |
+| Deterministic metrics | [`local/`](../src/long_document_indexing/evaluation/local) |
+| Foundry evaluation and publication | [`foundry/`](../src/long_document_indexing/evaluation/foundry) |
 | Report generation | [`reporting.py`](../src/long_document_indexing/reporting.py) |
 | Command-line orchestration | [`cli.py`](../src/long_document_indexing/cli.py) |
 
 To add a dataset, implement a loader that returns the shared corpus and question
 objects, then register it in
-[`datasets/registry.py`](../src/long_document_indexing/datasets/registry.py). To add a
+[the dataset registry](../src/long_document_indexing/datasets/registry.py). To add a
 retrieval system, implement the two `RagSystem` operations and register it in
-[`systems/registry.py`](../src/long_document_indexing/systems/registry.py). Keeping
+[the system registry](../src/long_document_indexing/systems/registry.py). Keeping
 those shared input and output structures allows the existing query, evaluation, and
 reporting code to include the new implementation.

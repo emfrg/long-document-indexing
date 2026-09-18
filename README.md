@@ -70,7 +70,7 @@ Each map contains:
 - references from every entry back to the source document and source passages.
 
 The core data model is in
-[`src/long_document_indexing/domain/maps.py`](src/long_document_indexing/domain/maps.py).
+[`maps.py`](src/long_document_indexing/domain/maps.py).
 A map entry has a `kind`, `label`, `summary`, and `source_references`. Entries may also
 have attributes and child entries.
 
@@ -148,9 +148,9 @@ experimental difference is whether document-map routing narrows the search befor
 passage retrieval.
 
 The shared map query flow is implemented in
-[`src/long_document_indexing/systems/map_base.py`](src/long_document_indexing/systems/map_base.py).
+[`map_base.py`](src/long_document_indexing/systems/map_base.py).
 The baseline is implemented in
-[`src/long_document_indexing/systems/flat_vector.py`](src/long_document_indexing/systems/flat_vector.py).
+[`flat_vector.py`](src/long_document_indexing/systems/flat_vector.py).
 
 ## Systems Compared
 
@@ -220,7 +220,7 @@ line. Each question includes its gold-standard answer, required documents and pa
 and supporting quotes.
 
 The benchmark uses a fixed set of 20 Multi-LexSum cases. The
-[`case manifest`](benchmarks/multilexsum/rag-qa-extended-case-manifest.json) lists those
+[case manifest](benchmarks/multilexsum/rag-qa-extended-case-manifest.json) lists those
 cases and the dataset version they come from, so every run loads the same source
 documents.
 
@@ -515,9 +515,9 @@ passages, answer text, and citations.
 | `tests/` | Unit and integration tests. |
 
 For a code-level tour, continue with
-[`docs/repo-walkthrough.md`](docs/repo-walkthrough.md). For details about the legal
+[Repository Walkthrough](docs/repo-walkthrough.md). For details about the legal
 questions and dataset licensing, read
-[`benchmarks/multilexsum/README.md`](benchmarks/multilexsum/README.md).
+[Multi-LexSum benchmark notes](benchmarks/multilexsum/README.md).
 
 ## Scope and Safety
 
