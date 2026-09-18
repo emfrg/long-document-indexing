@@ -1,45 +1,65 @@
 # Long Document Indexing
 
-This project compares ways to retrieve evidence from long, multi-document case files.
+Legal research usually involves multiple multi-page documents. A case file grows over
+time and may contain complaints, motions, exhibits, court orders, settlement agreements,
+and later enforcement decisions. The documents describe different stages of the same
+matter, often using different language for the same people, events, and legal issues.
 
-Its central question is simple:
+A retrieval system that provides useful answers may therefore depend on evidence spread
+across the case file. For example, a question could require connecting an allegation in
+a complaint with a later court ruling and the remedy recorded in a settlement (a
+multi-hop question). The relevant evidence is distributed across passages and documents
+that play different roles in the case.
 
-> Does a structured map of each document help a RAG system find the right evidence?
+This repository studies whether **document maps** can help a RAG system identify which
+documents should be searched for that distributed evidence. The reference experiment
+uses Multi-LexSum legal case files and compares a dense-retrieval baseline with six
+document-map strategies. Every system answers the same questions, uses the same answer
+model, and is scored against the same retrieval labels.
 
-The main benchmark uses legal case files from Multi-LexSum. It compares ordinary dense
-retrieval with six ways of building document maps. Every system answers the same
-questions, uses the same answer model, and is scored with the same retrieval labels.
+The reference experiment uses Azure OpenAI deployments configured through Microsoft
+Foundry for map generation, routing, answer generation, embeddings, and model-based
+evaluation. A deterministic local smoke test is also included; it requires no Azure
+credentials or paid API calls.
 
-This README starts with the idea, then shows the exact implementation, how to run a
-small local example, and how to reproduce the paid legal benchmark.
+The central research question is:
+
+> Does a structured map of each document help a RAG system route complex questions to
+> the documents that contain the required evidence?
 
 ## The Retrieval Problem
 
-A basic RAG system splits documents into passages, embeds those passages, and retrieves
-the passages most similar to a question:
+A basic RAG system splits documents into passages, or chunks, embeds those passages, and
+retrieves the passages most similar to a question:
 
 ```text
 question -> search every passage -> top passages -> answer model
 ```
 
-This works well when the answer is contained in one passage with wording close to the
-question. Long legal case files are harder:
+Semantic similarity retrieval scores each chunk independently against the question. It
+can miss evidence for multi-hop questions, where a chunk becomes relevant through its
+relationship to evidence in another chunk or document. Long legal documents add another
+challenge: each document has a specific role in the case, which chunk-level similarity
+may not preserve.
 
-- One case may contain complaints, motions, orders, settlements, and later decisions.
-- The question may use different language from the source.
-- Answering may require evidence from several documents.
-- A locally similar passage may be from the wrong stage of the case.
-- Splitting a document into passages removes some of its overall structure.
+- Evidence may be distributed across several documents.
+- Terminology may change between the complaint, later filings, and the final decision.
+- A chunk may match the topic but come from the wrong stage of the case.
+- Splitting a long document into chunks removes information about its overall role and
+  structure.
 
-The benchmark therefore separates two retrieval decisions:
-
-1. **Document routing:** Which documents are likely to contain the answer?
-2. **Evidence retrieval:** Which raw passages inside those documents support the answer?
+This repository focuses on the document-level step: constructing maps when documents are
+ingested, then using those maps to route each question to the most relevant documents.
+After routing, every map-based system uses the same dense retriever to find passages
+inside the selected documents. That passage-retrieval step is held fixed, not optimized
+here. Its metrics are reported only to show whether better routing improves the context
+eventually provided to the answer model.
 
 ## What Is a Document Map?
 
-A document map is a compact, structured description of one source document. It is an
-index, not the source itself and not a generated answer.
+A document map is a document-level representation created when source documents are
+ingested. It organizes the document's main contents into structured entries. Each entry
+tells the router what the document contains.
 
 Each map contains:
 
@@ -73,10 +93,11 @@ entry:
       segment_ids: [CJ-AL-0007:doc_0001:seg_0008]
 ```
 
-The router can read this compact entry to understand what the document contains. The
-segment IDs let the system return to the original text when it needs evidence.
+Map entries include references to their associated source passages. These references
+support quality checks on map construction. The agentic map builder also uses them to
+identify source passages that are not yet represented in the map.
 
-## Exactly How Map RAG Works Here
+## How Map-Based RAG Works in This Repository
 
 The repository builds two indexes for every mapped system:
 
@@ -118,18 +139,19 @@ The flat-vector baseline skips the map and router:
 question -> dense search over every raw passage -> top 8 passages -> shared answer model
 ```
 
-This makes the comparison meaningful. The main difference is whether a document-map
-routing stage narrows the search before passage retrieval.
+Both paths use the same dense retrieval backend and answer model. The main experimental
+difference is whether document-map routing narrows the search before passage retrieval.
 
-The exact shared map query flow is implemented in
+The shared map query flow is implemented in
 [`src/long_document_indexing/systems/map_base.py`](src/long_document_indexing/systems/map_base.py).
 The baseline is implemented in
 [`src/long_document_indexing/systems/flat_vector.py`](src/long_document_indexing/systems/flat_vector.py).
 
 ## Systems Compared
 
-All six map systems use the query flow above. They differ in how they construct each
-document map.
+All six map systems use the query flow above. They differ only in how they construct each
+document map. The benchmark tests whether those construction methods preserve different
+information and whether that difference affects retrieval.
 
 | System | What it does |
 | --- | --- |
@@ -222,8 +244,9 @@ Generated files are written under `artifacts/`, which is ignored by git.
 
 ## Run the Legal Benchmark
 
-The legal benchmark uses paid Azure OpenAI deployments. Start with the two-case smoke
-configuration before running the 20-case comparison.
+The reference legal experiment runs against Azure OpenAI deployments configured through
+Microsoft Foundry. Calls to these deployments can incur Azure usage charges. Start with
+the two-case smoke configuration before running the 20-case comparison.
 
 ### 1. Create the model deployments
 
@@ -269,7 +292,7 @@ uv run --python 3.13 --extra foundry --extra multilexsum \
 ```
 
 Use this run to verify the endpoint, deployments, quotas, structured outputs, embeddings,
-and report generation before spending money on the extended run.
+and report generation before starting the larger extended run.
 
 ### 4. Preview and run the 20-case comparison
 
@@ -294,9 +317,9 @@ uv run --python 3.13 --extra foundry --extra multilexsum \
 
 The run writes checkpoints as it progresses. Repeating the same command reuses valid
 indexes and successful answers, and retries missing or failed work. If an existing
-artifact no longer matches the current inputs, the command stops before paying to replace
-it. Review `--dry-run-budget`, then use `--allow-stale-recompute` only when that rebuild is
-intentional. `--force` rebuilds everything.
+artifact no longer matches the current inputs, the command stops before making model
+calls to replace it. Review `--dry-run-budget`, then use `--allow-stale-recompute` only
+when that rebuild is intentional. `--force` rebuilds everything.
 
 The configured model-call and token limits are safety ceilings. They are not estimates of
 the amount the run should consume.
