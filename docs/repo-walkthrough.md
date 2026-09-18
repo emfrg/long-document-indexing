@@ -1,184 +1,381 @@
 # Repository Walkthrough
 
-This project is a benchmark-first Python framework for comparing long-document indexing strategies for retrieval-augmented generation. It keeps the core benchmark loop independent from any one model provider, workflow framework, or evaluation backend.
+The [README](../README.md) explains the research question, document maps, metrics, and
+setup. This document follows one benchmark run through the repository so that you can
+see where the data is loaded, where each retrieval system runs, and where the results
+are written.
 
-## Build Order
-
-| Milestone | Name | What It Added |
-| --- | --- | --- |
-| 1 | Python benchmark kernel | Pydantic domain objects, local smoke corpus, questions, retrieval baseline, run records, and deterministic metrics. |
-| 2 | Workflow and Telemetry foundation | Workflow runner protocol, local workflow records, stable trace IDs, usage events, prompt loading, and service wiring. |
-| 3 | First Document Maps Systems | `stuffing`, `map_reduce`, and `refine` systems that build and query document maps through the same interfaces. |
-| 4 | Real Model Client thin slice | OpenAI-compatible generation client for Foundry/Azure OpenAI style endpoints. |
-| 5 | MAF workflow thin slice | Optional Microsoft Agent Framework runner behind the existing workflow interface. |
-| 6 | Foundry GPT-5 Structured Generation | Responses API support with Pydantic structured-output parsing for GPT-5-family deployments. |
-| 7 | Model-Backed Answer Generation | Optional generated answer mode with citation validation against retrieved evidence. |
-| 8 | Foundry Evaluation Export | Foundry-ready JSONL export with query, response, context, ground truth, and metadata. |
-| 9 | Multi-System Real Benchmark Run | Real GPT-5-family smoke run across `flat_vector`, `stuffing`, `map_reduce`, and `refine`. |
-| 10 | Analysis And Reporting Upgrade | Typed report bundle, Markdown report, CSV summaries, usage rollups, and issue summaries. |
-| 11 | Larger Benchmark Dataset Thin Slice | Versioned synthetic enterprise benchmark with 8 documents, 24 source segments, and 16 questions. |
-| 12 | Resumable And Budgeted Live Runs | Resume reuse, force rebuilds, dry-run budget planning, and model-call/token/cost caps. |
-| 13 | Foundry Managed Evaluation Execution | Azure AI Evaluation SDK execution path over exported JSONL datasets. |
-| 14 | Larger Real Benchmark Run | GPT-5-family stuffing-only enterprise run with managed `f1` and `rouge` scoring. |
-| 15 | Repo Polish And Final Walkthrough | This walkthrough, README alignment, packaging metadata, and final verification. |
-
-## Runtime Flow
-
-1. `ldi run --config <experiment.yaml>` loads the YAML experiment through `long_document_indexing.config`.
-2. The dataset adapter loads corpora and benchmark questions into stable domain models.
-3. The CLI builds `Services`: artifact storage, retrieval backend, workflow runner, prompt loader, usage ledger, and optional generation client.
-4. Index workflows call each configured system to create reusable `IndexArtifact` records.
-5. Query workflows run benchmark questions against those artifacts and write `RagRunRecord` JSONL files.
-6. Local evaluation reads the run records and writes deterministic `MetricRecord` JSONL files.
-7. Optional Foundry export converts run records into a single-turn evaluation dataset.
-8. Reporting aggregates metrics, run statuses, usage, Foundry export metadata, and managed-evaluation results.
-
-## Implemented System Set
-
-The implemented comparison set is one non-map baseline plus six document-map strategies:
-
-| System | What It Does |
-| --- | --- |
-| `flat_vector` | Embeds raw source segments and retrieves directly from the dense index. |
-| `stuffing` | Builds one document map from the whole document when it fits the configured context budget. |
-| `map_reduce` | Builds segment-level maps, then merges them through a bounded fan-in reduction. |
-| `refine` | Builds a document map by revising it sequentially over ordered segments. |
-| `hierarchical_map` | Builds leaf maps for segment groups, then reduces them through a bounded hierarchy. |
-| `outline_then_fill` | Generates an outline plan, fills each outline node from assigned source segments, then assembles the final map. |
-| `agentic_map` | Runs a bounded inspect-and-revise loop that records selected segments, coverage, and intermediate map states. |
-
-All six map-producing systems inherit the same controlled query path: an LLM router reads the complete normalized maps and selects source documents, the shared dense backend retrieves raw segments only from those documents, and the answer model responds from the retrieved evidence. The flat baseline searches the same dense raw-segment index without map routing.
-
-## Directory Guide
-
-`src/long_document_indexing/domain/` contains the benchmark schemas. These objects define corpora, questions, maps, run records, metric records, and usage records.
-
-`src/long_document_indexing/datasets/` adapts benchmark assets into the domain model. The local JSON/JSONL adapter is the default path; `multilexsum` is optional for later external dataset work.
-
-`src/long_document_indexing/systems/` contains the indexing strategies under comparison. `flat_vector` is the non-map baseline, while `stuffing`, `map_reduce`, `refine`, `hierarchical_map`, `outline_then_fill`, and `agentic_map` use document maps.
-
-`src/long_document_indexing/workflows/` defines the execution boundary. The local runner and MAF runner both expose the same workflow result shape, so benchmark behavior does not depend on the workflow backend.
-
-`src/long_document_indexing/models/` defines generation and embedding boundaries. Fake clients keep tests deterministic; OpenAI-compatible clients support Foundry/Azure OpenAI structured generation and embeddings.
-
-`src/long_document_indexing/evaluation/` contains local metrics and Foundry adapters. Local metrics are deterministic. Foundry export and managed evaluation are opt-in.
-
-`src/long_document_indexing/reporting.py` builds the report bundle used by `ldi report` and the end of `ldi run`.
-
-`configs/experiments/` contains complete runnable benchmark definitions. `configs/systems/` stores the indexing and retrieval configuration for each system.
-
-`benchmarks/` contains versioned benchmark fixtures. `benchmarks/smoke/` is the smallest deterministic fixture. `benchmarks/enterprise/` is the larger synthetic thin slice.
-
-`prompts/` contains prompt templates for maps, route decisions, and generated answers.
-
-`artifacts/` is ignored by git. It stores manifests, indexes, run JSONL, metrics, usage ledgers, Foundry exports, managed-evaluation outputs, and reports.
-
-## Main Commands
-
-Run the deterministic smoke benchmark:
-
-```bash
-uv run --python 3.13 --no-editable --reinstall-package long-document-indexing ldi run --config configs/experiments/smoke-test.yaml
-```
-
-Run the deterministic enterprise benchmark:
-
-```bash
-uv run --python 3.13 --no-editable --reinstall-package long-document-indexing ldi run --config configs/experiments/enterprise-thin-slice.yaml
-```
-
-Run all implemented systems on the deterministic smoke benchmark:
-
-```bash
-uv run --python 3.13 --no-editable --reinstall-package long-document-indexing ldi run --config configs/experiments/advanced-systems-smoke.yaml
-```
-
-Run all implemented systems on the deterministic enterprise benchmark:
-
-```bash
-uv run --python 3.13 --no-editable --reinstall-package long-document-indexing ldi run --config configs/experiments/enterprise-advanced-thin-slice.yaml
-```
-
-Preview budget state before a live run:
-
-```bash
-uv run --python 3.13 --extra foundry --no-editable --reinstall-package long-document-indexing ldi run --config configs/experiments/foundry-enterprise-stuffing-thin-slice.yaml --dry-run-budget
-```
-
-The preview separates reusable, stale, failed/skipped, and missing work. Resume may
-continue failed or missing units automatically. Replacing stale completed work requires
-the explicit `--allow-stale-recompute` flag; `--force` intentionally replaces everything.
-Artifacts and ledgers are persisted atomically after each completed unit, and incomplete
-query sets are rejected before Foundry export or publication.
-
-Run the capped real enterprise stuffing benchmark:
-
-```bash
-uv run --python 3.13 --extra foundry --no-editable --reinstall-package long-document-indexing ldi run --config configs/experiments/foundry-enterprise-stuffing-thin-slice.yaml --resume
-```
-
-Run managed evaluation over an existing export:
-
-```bash
-uv run --python 3.13 --extra foundry --no-editable --reinstall-package long-document-indexing ldi evaluate-foundry-managed --config configs/experiments/enterprise-thin-slice.yaml
-```
-
-Run the extended legal RAG comparison after the role-separated smoke benchmark succeeds:
-
-```bash
-uv run --python 3.13 --extra foundry --extra multilexsum --no-editable --reinstall-package long-document-indexing ldi run --config configs/experiments/foundry-multilexsum-legal-rag-qa-role-separated-extended.yaml --dry-run-budget
-uv run --python 3.13 --extra foundry --extra multilexsum --no-editable --reinstall-package long-document-indexing ldi run --config configs/experiments/foundry-multilexsum-legal-rag-qa-role-separated-extended.yaml
-uv run --python 3.13 --extra foundry --extra multilexsum --no-editable --reinstall-package long-document-indexing ldi evaluate-foundry-managed --config configs/experiments/foundry-multilexsum-legal-rag-qa-role-separated-extended.yaml
-uv run --python 3.13 --extra foundry --extra multilexsum --no-editable --reinstall-package long-document-indexing ldi publish-foundry-evals --config configs/experiments/foundry-multilexsum-legal-rag-qa-role-separated-extended.yaml --evaluation-name ldi-multilexsum-legal-rag-qa-extended --run-name rag-qa-role-separated-extended-visible
-```
-
-The extended assets contain 20 explicit case IDs and 60 evidence-labelled questions:
-20 single-document, 20 multi-document, and 20 three-stage chained multi-document items.
-The local and portal-visible comparison covers all 420 system/question rows. Managed
-model judging uses a fixed 20% sample from each difficulty tier, shared by all seven
-systems, and stores per-system evaluator checkpoints and metrics.
-
-Regenerate a report from existing artifacts:
-
-```bash
-uv run --python 3.13 --no-editable --reinstall-package long-document-indexing ldi report --config configs/experiments/enterprise-thin-slice.yaml
-```
-
-## Credential Boundaries
-
-No credentials are needed for fake-generator local runs.
-
-Real inference needs `.env` or environment variables for:
+The main entry point is an experiment YAML file. The command-line program is called
+`ldi`, short for Long Document Indexing. When you run `ldi` with an experiment file,
+the repository performs the following steps:
 
 ```text
-FOUNDRY_GENERATOR_BASE_URL
-FOUNDRY_GENERATOR_DEPLOYMENT
-FOUNDRY_EMBEDDING_MODEL
-AZURE_INFERENCE_CREDENTIAL
+experiment YAML
+      |
+      v
+load cases and benchmark questions
+      |
+      v
+build an index for every system and case
+      |
+      v
+run every question through every system
+      |
+      v
+save answers, routing decisions, and retrieved passages
+      |
+      v
+calculate metrics and write reports
 ```
 
-`FOUNDRY_EMBEDDING_MODEL` must name an embedding deployment on the same compatible endpoint. The checked-in Foundry configs default to `text-embedding-3-large` when the variable is unset or blank.
+The reference experiment is
+[`foundry-multilexsum-legal-rag-qa-role-separated-extended.yaml`](../configs/experiments/foundry-multilexsum-legal-rag-qa-role-separated-extended.yaml).
+It compares seven systems on 60 questions from 20 Multi-LexSum legal cases. The smaller
+[`advanced-systems-smoke.yaml`](../configs/experiments/advanced-systems-smoke.yaml)
+uses local test data and fake model clients, so it is the best place to start when you
+want to inspect the workflow without making paid API calls.
 
-The base URL should end at `/openai/v1/`. If it includes `/responses` or `/chat/completions`, the client normalizes it.
+## 1. The Experiment File
 
-Azure CLI login is not needed for API-key inference. Use `az login` only when using Azure default credentials or when the Azure AI Evaluation SDK asks for project logging authentication.
+An experiment YAML file defines the complete comparison. The extended legal experiment
+contains these sections:
 
-`azd` is not needed for this repo's local benchmark runs. It is only needed for provisioning or hosted-agent workflows.
+| Section | What it controls |
+| --- | --- |
+| `experiment` | The experiment ID, random seed, and number of times each question is run. |
+| `dataset` | The dataset version, selected cases, question file, and source-document chunking. |
+| `models` | The Azure deployments used for map generation, routing, answering, judging, and embeddings. |
+| `shared_pipeline` | How many documents the router may select and how many passages retrieval may return. |
+| `systems` | The retrieval systems included in the comparison. |
+| `run_control` | Resume behavior and the maximum number of model calls and tokens allowed. |
+| `evaluation` | The local metrics and optional Foundry evaluators to run. |
+| `storage` | The directory where the experiment writes its artifacts. |
 
-## Extension Points
+For the reference experiment, the router may select up to three documents and the
+dense retriever may return up to eight passages. Those limits apply equally to all six
+document-map systems. The flat-vector baseline also returns up to eight passages.
 
-Add a dataset by implementing a dataset adapter and registering it in `datasets/registry.py`.
+The YAML is parsed and validated by
+[`config.py`](../src/long_document_indexing/config.py). The model values in the
+reference config resolve to Azure deployment names supplied through environment
+variables, normally loaded from `.env`. See the
+[README setup section](../README.md#run-the-legal-benchmark) and
+[`.env.example`](../.env.example) for the required values.
 
-Add a RAG system by implementing `RagSystem`, adding it to `systems/registry.py`, and giving it a config entry.
+## 2. Cases and Questions
 
-Add a model provider by implementing `TextGenerationClient` and/or `EmbeddingClient` and wiring it in `models/factory.py`.
+The dataset loader turns the source data into three simple levels:
 
-Add a workflow backend by implementing `WorkflowRunner` and selecting it through `workflow.runner`.
+```text
+Corpus   = one legal case
+Document = one source document in that case
+Segment  = one passage cut from that document
+```
 
-Add local metrics by extending `evaluation/local/` and listing the metric name in an experiment config.
+The shared definitions are in
+[`domain/corpus.py`](../src/long_document_indexing/domain/corpus.py). The
+[`MultiLexSumDatasetAdapter`](../src/long_document_indexing/datasets/multilexsum.py)
+loads the fixed Multi-LexSum revision named in the experiment, selects the configured
+cases, and creates stable document and segment IDs.
 
-Add a new report field by extending the typed report bundle in `reporting.py` and its focused tests.
+The 60 questions are stored in
+[`rag-qa-extended.jsonl`](../benchmarks/multilexsum/rag-qa-extended.jsonl). Each line
+contains one question and the information needed to score it later: the expected
+answer, required documents, required passages, and supporting quotes. The
+[`case manifest`](../benchmarks/multilexsum/rag-qa-extended-case-manifest.json) records
+the 20 case IDs and the exact dataset revision used for their source documents.
 
-## Final State
+The fields required for each loaded question are defined by `BenchmarkItem` in
+[`domain/benchmark.py`](../src/long_document_indexing/domain/benchmark.py). After
+loading, the rest of the repository works with the same `Corpus` and `BenchmarkItem`
+objects regardless of where the data came from.
 
-The repo is now ready for structured inspection. The tracked source defines the reusable benchmark framework, and the implemented system set covers a flat-vector baseline plus six document-map strategies. Ignored artifacts preserve local run evidence without polluting git history.
+## 3. Models, Storage, and Retrieval
+
+Before indexing begins, the CLI creates the resources used by every system:
+
+- the map-generation, routing, and answer model clients;
+- the embedding client and dense passage retriever;
+- the artifact store used to save indexes, runs, and reports;
+- the prompt loader, model-usage recorder, and progress reporter.
+
+These resources are grouped in the `Services` object in
+[`services.py`](../src/long_document_indexing/services.py). They are created from the
+experiment configuration in
+[`cli.py`](../src/long_document_indexing/cli.py). This gives every system the same
+model roles, retrieval backend, storage rules, and prompt-loading mechanism for a
+controlled comparison.
+
+## 4. Building the Indexes
+
+Every retrieval system implements the two operations defined by `RagSystem` in
+[`systems/base.py`](../src/long_document_indexing/systems/base.py):
+
+1. `build_index` prepares one case for retrieval and returns an `IndexArtifact` that
+   records where the resulting files were saved.
+2. `run_query` answers one benchmark question using that case's saved index and returns
+   a `RagRunRecord`.
+
+For work that is not reused from an earlier run, the CLI calls `build_index` once for
+every configured system and case. The two kinds of system build different artifacts.
+
+### Flat-Vector Baseline
+
+[`flat_vector.py`](../src/long_document_indexing/systems/flat_vector.py) embeds the raw
+source passages and saves a dense index. It creates no document maps.
+
+```text
+source documents -> passages -> embeddings -> dense passage index
+```
+
+### Document-Map Systems
+
+Each document-map system creates the same dense passage index and attempts to create one
+map for every source document:
+
+```text
+source document -> passages -> map-building strategy -> document map
+       |
+       +---------------------> embeddings -> dense passage index
+```
+
+The six strategies differ in the way they construct the map:
+
+| System | Map-construction method |
+| --- | --- |
+| `stuffing` | Sends the whole document to the map builder in one call. Documents above the context limit are recorded as `context_overflow`. |
+| `map_reduce` | Maps document parts independently, then merges the partial maps. |
+| `refine` | Reads passages in order and updates one evolving map after each passage. |
+| `hierarchical_map` | Builds maps for small groups of passages, then combines them through several levels. |
+| `outline_then_fill` | Creates an outline, fills its sections from the source passages, and assembles the final map. |
+| `agentic_map` | Repeatedly inspects the document and revises the map until it reaches its stopping condition. |
+
+Their implementations are in
+[`systems/`](../src/long_document_indexing/systems). Their shared indexing and query
+behavior is in
+[`map_base.py`](../src/long_document_indexing/systems/map_base.py). Every completed map
+uses the common `DocumentMap` and `MapEntry` structures defined in
+[`domain/maps.py`](../src/long_document_indexing/domain/maps.py).
+
+Indexing results are saved after each case. Several map-building strategies also save
+intermediate checkpoints while processing long documents. When `--resume` is used, the
+repository checks that each saved artifact still exists and has the current index
+signature, which is a fingerprint of the settings used to build it. The fingerprint
+covers the retrieval backend, embedding model, map-building model and prompts, and
+relevant configuration. A mismatch makes the artifact stale, and replacing stale work
+requires the explicit `--allow-stale-recompute` option.
+
+## 5. Running a Question
+
+After every required index exists, the CLI calls `run_query` for each combination of
+system and question.
+
+### Flat-Vector Query
+
+```text
+question
+   |
+   v
+dense search across every passage in the case
+   |
+   v
+top 8 passages
+   |
+   v
+answer model -> answer and citations
+```
+
+The baseline has no separate document-selection step. For document-level metrics, its
+selected documents are the first unique document IDs found in its ranked passage
+results.
+
+### Document-Map Query
+
+```text
+question
+   |
+   v
+router reads the document maps for the case
+   |
+   v
+select up to 3 documents
+   |
+   v
+dense search across passages from those documents
+   |
+   v
+top 8 passages
+   |
+   v
+answer model -> answer and citations
+```
+
+[`routing.py`](../src/long_document_indexing/routing.py) sends the complete maps and the
+question to the routing model. The router returns the selected document IDs, a
+rationale, and any unresolved information needs. The dense retriever then searches the
+original passages belonging to those documents.
+
+Map source references make each map entry traceable to its source passages and support
+checks on map construction. The retrieved context comes from a separate dense search
+after the router has selected documents.
+
+Finally,
+[`answering.py`](../src/long_document_indexing/answering.py) sends the retrieved source
+passages to the answer model. The model returns a structured answer with citations, and
+each citation must identify one of the retrieved evidence records. The code then assigns
+the corresponding document and passage IDs to that citation.
+
+## 6. The Standard Run Record
+
+Every system writes the result of one question as a `RagRunRecord`, defined in
+[`domain/runs.py`](../src/long_document_indexing/domain/runs.py). It contains:
+
+| Field group | Contents |
+| --- | --- |
+| Identity | Experiment, system, case, question, and repetition IDs. |
+| Routing | Selected document IDs and the router's structured decision when a router was used. |
+| Retrieval | Ranked passages, similarity scores, and source IDs. |
+| Answer | Generated answer and citations. |
+| Usage | Model calls, token counts, tool calls, and duration. |
+| Status | Whether the question succeeded, failed, or was skipped, plus any error. |
+
+The records are written to one JSONL file per system under `runs/`, with one JSON object
+per line. A common record format allows the same evaluation and reporting code to
+compare all seven systems.
+
+## 7. Evaluation and Reporting
+
+`ldi evaluate` reads the run records and the expected answers, documents, passages, and
+quotes from the question set. It calculates the configured local metrics directly,
+without a judge model. It also reads the saved index artifacts when calculating
+map-construction metrics. The metric implementations are in
+[`evaluation/local/`](../src/long_document_indexing/evaluation/local), and their common
+runner is
+[`evaluation/runner.py`](../src/long_document_indexing/evaluation/runner.py).
+
+The results answer three kinds of question:
+
+1. **Document routing:** Did the system select the documents required by the question?
+2. **Downstream retrieval:** Did the fixed passage retriever find the labeled evidence
+   after document selection?
+3. **Supporting checks:** Were maps valid, citations supported, answers complete, and
+   the runtime and token use acceptable?
+
+The [README metric tables](../README.md#what-the-benchmark-measures) define every metric
+reported by the reference experiment.
+
+When Foundry evaluation is enabled, `ldi evaluate` also exports the completed run
+records as a 420-row evaluation dataset. Two later commands use that export for
+different purposes:
+
+- `ldi evaluate-foundry-managed` runs model-based Foundry evaluators such as
+  groundedness, relevance, and response completeness. The reference config evaluates a
+  fixed 20% sample for each system and checkpoints each evaluator separately.
+- `ldi publish-foundry-evals` creates one portal-visible run per system and applies the
+  deterministic retrieval, citation, and answer-overlap graders used for the Foundry
+  comparison view.
+
+Neither command reruns indexing, retrieval, or answer generation. They evaluate and
+publish the saved benchmark outputs.
+
+`ldi report` aggregates the metric records and usage ledgers into Markdown, CSV, and
+JSON summaries. The reporting code is in
+[`reporting.py`](../src/long_document_indexing/reporting.py).
+
+## 8. Where to Find the Outputs
+
+Each experiment writes to `artifacts/<experiment-id>/`. After a complete reference run,
+the most useful files are organized like this:
+
+```text
+artifacts/<experiment-id>/
+  manifest.json                         resolved experiment and dataset details
+  indexes/
+    dense_vector/                       saved passage embeddings
+    <system>/                           index metadata; map systems also store maps
+  runs/
+    <system>.jsonl                      one full result per question
+  evaluations/
+    local-metrics.jsonl                 individual deterministic metric values
+    foundry/                            exported datasets and Foundry results
+  costs/
+    index-usage.jsonl                   indexing tokens, calls, and duration
+    query-usage.jsonl                   query tokens, calls, and duration
+  workflows/                            per-case and per-question execution records
+  report/
+    results.md                          readable experiment report
+    system-summary.csv                  one summary row per system
+    results.csv                         mean value for every system and metric
+    confidence-intervals.csv            metric means with 95% intervals
+    usage-summary.csv                   token, call, and duration totals
+    summary.json                        complete machine-readable report
+```
+
+Start with `report/results.md` for the comparison. Open `system-summary.csv` when you
+want one row per system, and `results.csv` when you want every metric. To investigate a
+specific result, find the question in `runs/<system>.jsonl`, then inspect the selected
+documents, retrieved passages, answer, and citations stored in that record.
+
+## 9. Running the Repository
+
+After completing the installation steps in
+[Try It Locally](../README.md#try-it-locally), run all seven systems with local fixtures
+and fake model clients:
+
+```bash
+uv run --python 3.13 \
+  --no-editable \
+  --reinstall-package long-document-indexing \
+  ldi run \
+  --config configs/experiments/advanced-systems-smoke.yaml
+```
+
+This run checks the full software workflow. Use its scores to confirm expected test
+behavior; the Multi-LexSum experiment provides the retrieval comparison.
+
+After completing the setup in
+[Run the Legal Benchmark](../README.md#run-the-legal-benchmark), preview the budget
+before making model calls:
+
+```bash
+uv run --python 3.13 \
+  --extra foundry \
+  --extra multilexsum \
+  --no-editable \
+  --reinstall-package long-document-indexing \
+  ldi run \
+  --config configs/experiments/foundry-multilexsum-legal-rag-qa-role-separated-extended.yaml \
+  --dry-run-budget
+```
+
+The full setup, role-separated smoke test, extended run, managed evaluation, and Foundry
+publication commands are in
+[Run the Legal Benchmark](../README.md#run-the-legal-benchmark). You can also
+run the lifecycle phases separately with `ldi prepare`, `ldi index`, `ldi query`,
+`ldi evaluate`, and `ldi report` when you are investigating one stage.
+
+## 10. Finding the Code You Need
+
+| If you want to understand or change... | Start here |
+| --- | --- |
+| Experiment settings | [`configs/experiments/`](../configs/experiments) |
+| Per-system settings | [`configs/systems/`](../configs/systems) |
+| Multi-LexSum loading and chunking | [`datasets/multilexsum.py`](../src/long_document_indexing/datasets/multilexsum.py) |
+| Corpus, question, map, and run data definitions | [`domain/`](../src/long_document_indexing/domain) |
+| A map-construction strategy | [`systems/`](../src/long_document_indexing/systems) |
+| Shared map routing and retrieval | [`systems/map_base.py`](../src/long_document_indexing/systems/map_base.py) |
+| Router requests and responses | [`routing.py`](../src/long_document_indexing/routing.py) |
+| Dense passage indexing and search | [`retrieval/dense_vector.py`](../src/long_document_indexing/retrieval/dense_vector.py) |
+| Answer generation and citation validation | [`answering.py`](../src/long_document_indexing/answering.py) |
+| Deterministic metrics | [`evaluation/local/`](../src/long_document_indexing/evaluation/local) |
+| Foundry evaluation and publication | [`evaluation/foundry/`](../src/long_document_indexing/evaluation/foundry) |
+| Report generation | [`reporting.py`](../src/long_document_indexing/reporting.py) |
+| Command-line orchestration | [`cli.py`](../src/long_document_indexing/cli.py) |
+
+To add a dataset, implement a loader that returns the shared corpus and question
+objects, then register it in
+[`datasets/registry.py`](../src/long_document_indexing/datasets/registry.py). To add a
+retrieval system, implement the two `RagSystem` operations and register it in
+[`systems/registry.py`](../src/long_document_indexing/systems/registry.py). Keeping
+those shared input and output structures allows the existing query, evaluation, and
+reporting code to include the new implementation.

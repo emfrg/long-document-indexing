@@ -38,22 +38,24 @@ question -> search every passage -> top passages -> answer model
 
 Semantic similarity retrieval scores each chunk independently against the question. It
 can miss evidence for multi-hop questions, where a chunk becomes relevant through its
-relationship to evidence in another chunk or document. Long legal documents add another
-challenge: each document has a specific role in the case, which chunk-level similarity
-may not preserve.
+relationship to evidence elsewhere. Long individual documents make this harder by
+distributing related information across many chunks and separating each chunk from the
+document's broader structure. Multi-document case files add a distinct challenge:
+complaints, orders, and settlements play different roles, which chunk-level similarity
+does not explicitly represent.
 
 - Evidence may be distributed across several documents.
 - Terminology may change between the complaint, later filings, and the final decision.
 - A chunk may match the topic but come from the wrong stage of the case.
-- Splitting a long document into chunks removes information about its overall role and
-  structure.
+- Splitting a long document into chunks can obscure relationships between distant
+  sections and the document's overall structure.
 
 This repository focuses on the document-level step: constructing maps when documents are
 ingested, then using those maps to route each question to the most relevant documents.
 After routing, every map-based system uses the same dense retriever to find passages
-inside the selected documents. That passage-retrieval step is held fixed, not optimized
-here. Its metrics are reported only to show whether better routing improves the context
-eventually provided to the answer model.
+inside the selected documents. The experiment holds this passage-retrieval step fixed
+across systems. Its metrics show whether document routing improves the
+context ultimately provided to the answer model.
 
 ## What Is a Document Map?
 
@@ -99,7 +101,9 @@ identify source passages that are not yet represented in the map.
 
 ## How Map-Based RAG Works in This Repository
 
-The repository builds two indexes for every mapped system:
+For each of the six document-map systems, the repository creates two representations of
+the source material: document maps for routing and a dense passage index for evidence
+retrieval.
 
 ```text
 INDEXING
@@ -129,18 +133,19 @@ retrieve up to 8 raw evidence passages
 shared answer model -> answer and citations
 ```
 
-The important detail is that the answer model receives raw source passages. It does not
-answer from map summaries. Maps are used to choose documents; dense retrieval is used to
-choose evidence within them.
+The router uses the document maps to select documents. The dense retriever then finds
+relevant passages in those documents, and the original passages are sent to the answer
+model.
 
-The flat-vector baseline skips the map and router:
+The flat-vector baseline does not use document maps or a document router:
 
 ```text
 question -> dense search over every raw passage -> top 8 passages -> shared answer model
 ```
 
-Both paths use the same dense retrieval backend and answer model. The main experimental
-difference is whether document-map routing narrows the search before passage retrieval.
+Both paths use the same dense retrieval backend and answer model. Therefore, the main
+experimental difference is whether document-map routing narrows the search before
+passage retrieval.
 
 The shared map query flow is implemented in
 [`src/long_document_indexing/systems/map_base.py`](src/long_document_indexing/systems/map_base.py).
@@ -163,10 +168,6 @@ information and whether that difference affects retrieval.
 | `outline_then_fill` | Creates a document outline first, then fills its sections from the source. |
 | `agentic_map` | Uses a bounded inspect-and-revise loop to find and fill missing coverage. |
 
-The system interface is deliberately small: build an index, then answer a benchmark
-question from that index. See
-[`src/long_document_indexing/systems/base.py`](src/long_document_indexing/systems/base.py).
-
 ## What the Benchmark Measures
 
 The extended comparison uses:
@@ -178,36 +179,129 @@ The extended comparison uses:
 - 20 chained multi-document questions;
 - 7 retrieval systems, producing 420 answer runs.
 
-Each question includes an expected answer and labels for the documents, passages, and
-quotes needed to answer it. These labels let the benchmark measure retrieval directly,
-instead of treating answer wording as a substitute for retrieval quality.
+Each benchmark question is stored as JSON with its gold-standard answer and supporting
+evidence. See for example:
 
-The benchmark lives in
-[`benchmarks/multilexsum/rag-qa-extended.jsonl`](benchmarks/multilexsum/rag-qa-extended.jsonl).
-The selected cases and dataset revision are recorded in
-[`benchmarks/multilexsum/rag-qa-extended-case-manifest.json`](benchmarks/multilexsum/rag-qa-extended-case-manifest.json).
+```json
+{
+  "query": "Across the complaint and consent decree, what workplace discrimination was alleged and how much did Brown Publishing agree to pay William Hubbard?",
+  "ground_truth": {
+    "expected_answer": "The complaint alleged a racially hostile work environment at the Xenia facility, and Brown Publishing agreed to pay William Hubbard $24,750 without admitting liability.",
+    "relevant_document_ids": [
+      "EE-OH-0071:doc_0001",
+      "EE-OH-0071:doc_0003"
+    ],
+    "relevant_segment_ids": [
+      "EE-OH-0071:doc_0001:seg_0001",
+      "EE-OH-0071:doc_0003:seg_0001"
+    ],
+    "evidence": [
+      {
+        "document_id": "EE-OH-0071:doc_0001",
+        "segment_id": "EE-OH-0071:doc_0001:seg_0001",
+        "quote": "racially hostile work environment at its Xenia, Ohio facility"
+      },
+      {
+        "document_id": "EE-OH-0071:doc_0003",
+        "segment_id": "EE-OH-0071:doc_0003:seg_0001",
+        "quote": "Without admitting liability, Brown Publishing agrees to pay the sum of $24,750.00 to William Hubbard"
+      }
+    ]
+  }
+}
+```
 
-### Primary Retrieval Metrics
+During evaluation, each system's generated answer and citations are compared with the
+gold documents, passages, and quotes shown above.
 
-| Metric | Plain-language question |
+The 60 benchmark questions are stored in
+[`rag-qa-extended.jsonl`](benchmarks/multilexsum/rag-qa-extended.jsonl), one question per
+line. Each question includes its gold-standard answer, required documents and passages,
+and supporting quotes.
+
+The benchmark uses a fixed set of 20 Multi-LexSum cases. The
+[`case manifest`](benchmarks/multilexsum/rag-qa-extended-case-manifest.json) lists those
+cases and the dataset version they come from, so every run loads the same source
+documents.
+
+### Primary Routing Metrics
+
+These metrics directly measure whether document maps help select the required documents.
+
+| Metric | What it measures |
 | --- | --- |
-| `document_recall_at_3` | Did the system's first three document choices include the gold documents? |
-| `required_document_coverage` | When several documents were required, how much of that required set was selected? |
-| `context_precision_at_4` | How many of the first four retrieved passages were actually relevant? |
-| `context_recall_at_4` | How much of the labeled passage evidence appeared in the first four results? |
-| `evidence_quote_recall_at_4` | How much of the expected quoted evidence was recovered? |
+| `document_recall_at_1` | The fraction of required documents found in the first document choice. |
+| `document_recall_at_3` | The fraction of required documents found in the first three choices. |
+| `mrr` | How highly the first required document was ranked. |
+| `required_document_coverage` | Whether every required document was selected. |
 
-These are the main metrics for answering whether document maps improve retrieval.
+### Downstream Retrieval Metrics
+
+Every document-map system uses the same dense passage retriever. These metrics show how
+the routing decision affects the passages that retriever finds.
+
+| Metric | What it measures |
+| --- | --- |
+| `segment_recall_at_4` | The fraction of required passages found in the first four results. |
+| `context_precision_at_4` | Whether relevant passages were ranked ahead of irrelevant passages in the first four results. |
+| `context_recall_at_4` | The fraction of labeled evidence found in the first four results. |
+| `evidence_quote_recall_at_4` | The fraction of gold evidence quotes present in the first four retrieved passages. |
 
 ### Supporting Metrics
 
-The repository also measures citation validity and support, map validity, latency, model
-calls, and token use. Foundry model judges can score groundedness, relevance, retrieval,
-document retrieval, and response completeness.
+These metrics describe the maps, citations, generated answers, and operational cost of
+each system.
 
-Answer-to-reference token overlap is included as a secondary check. It is sensitive to
-wording and prompt choices, so it should not be presented as direct evidence that one
-retriever is better.
+#### Map Construction
+
+| Metric | What it measures |
+| --- | --- |
+| `map_schema_validity` | The fraction of saved maps that can be loaded as valid document maps. |
+| `map_source_reference_validity` | The fraction of source references that point to existing passages in the correct document. |
+| `map_compression_ratio` | The size of the document maps relative to the source documents. |
+| `map_completion_rate` | The fraction of source documents for which a map was created. |
+
+#### Citations
+
+| Metric | What it measures |
+| --- | --- |
+| `citation_precision` | The fraction of generated citations that point to required documents or passages. |
+| `citation_recall` | The fraction of required documents or passages covered by the generated citations. |
+| `citation_support_rate` | The fraction of citation quotes found in the source location they cite. |
+| `invalid_citation_rate` | The fraction of citations that point to an unknown document or passage. |
+
+#### Answer Comparison
+
+| Metric | What it measures |
+| --- | --- |
+| `answer_reference_token_precision` | How much of the generated answer's wording overlaps the gold-standard answer. |
+| `answer_reference_token_recall` | How much of the gold-standard answer's wording appears in the generated answer. |
+| `answer_reference_token_f1` | The balance between answer token precision and recall. |
+
+#### Runtime and Usage
+
+| Metric | What it measures |
+| --- | --- |
+| `query_duration_ms` | Time spent processing one question. |
+| `tool_calls` | Query-stage operations: retrieval for the baseline, and routing plus retrieval for map-based systems. |
+
+The usage report separately records model calls and input and output tokens for indexing
+and querying.
+
+#### Foundry Model-Judge Metrics
+
+| Metric | What it measures |
+| --- | --- |
+| `groundedness` | Whether the answer is supported by the retrieved context. |
+| `relevance` | Whether the answer addresses the question. |
+| `retrieval` | The quality of the retrieved context. |
+| `document_retrieval` | Whether the selected documents match the required documents. |
+| `response_completeness` | Whether the answer covers the information in the gold-standard answer. |
+
+The routing, retrieval, map, citation, and answer-comparison scores computed by the
+repository range from 0 to 1. Higher is better, except for `invalid_citation_rate`.
+`map_compression_ratio`, runtime, and usage describe trade-offs rather than quality.
+Foundry model judges use their own scoring scales.
 
 ## Try It Locally
 
@@ -222,6 +316,9 @@ Install the development dependencies:
 uv sync --python 3.13 --extra dev
 ```
 
+The package installs a command-line program named `ldi`, short for Long Document
+Indexing. The `ldi run` command reads an experiment configuration and runs the benchmark.
+
 Run all seven systems on the small deterministic fixture:
 
 ```bash
@@ -231,8 +328,8 @@ uv run --python 3.13 --no-editable \
 ```
 
 This run uses local fake models, so it gives the same results each time and does not
-require Azure credentials or paid model calls. It exercises the same indexing, query,
-metric, and reporting code used by the real experiment.
+require Azure credentials or paid model calls. It builds indexes, runs questions through
+all seven systems, calculates metrics, and writes reports.
 
 Run the tests:
 
@@ -240,7 +337,7 @@ Run the tests:
 uv run --python 3.13 --extra dev pytest
 ```
 
-Generated files are written under `artifacts/`, which is ignored by git.
+Results are written to `artifacts/advanced-systems-smoke/`.
 
 ## Run the Legal Benchmark
 
