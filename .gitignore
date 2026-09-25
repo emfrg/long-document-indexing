@@ -15,7 +15,11 @@
 /artifacts/
 /results/*
 !/results/.gitkeep
+!/results/foundry-multilexsum-legal-rag-qa-role-separated-extended/
+!/results/foundry-multilexsum-legal-rag-qa-role-separated-extended/**
 
 *.parquet
 *.sqlite
 *.db
+
+.DS_Store
