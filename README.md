@@ -24,9 +24,7 @@ The repository includes:
 
 A standard RAG system typically splits documents into passages, embeds them, and retrieves the passages most similar to a question:
 
-```text
-question -> search every passage -> top passages -> answer model
-```
+![Dense retrieval: the question is matched against every passage, and the top passages are handed to the answer model.](docs/images/long-document-indexing/dense-retrieval.svg)
 
 For long, multi-document collections, a question may depend on evidence spread across several documents. In a legal case file, for example, the complaint, a later court order, and a settlement may each contain a different part of the answer.
 
@@ -72,15 +70,12 @@ entry:
 
 ### Indexing
 
-Every map-based system creates two representations of the source material:
+Every map-based system creates two separate artifacts from the same source passages:
 
-```text
-source document -> ordered passages -> map-building strategy -> document map
-       |
-       +----------------------------> dense passage index
-```
+1. A **document map** summarizes what each document contains. The router reads these maps to decide which documents to search.
+2. A **dense passage index** stores embeddings of the original passages. After routing, the retriever searches this index within the selected documents.
 
-The document map is used for routing. The dense index stores the original source passages used for evidence retrieval.
+The dense index is not built from the document map. Both are created during indexing from the original source material and serve different stages of the query flow.
 
 The flat-vector baseline creates only the dense passage index.
 
@@ -88,39 +83,11 @@ The flat-vector baseline creates only the dense passage index.
 
 For a map-based system:
 
-```text
-question
-   |
-   v
-router reads document maps
-   |
-   v
-select up to 3 documents
-   |
-   v
-dense search inside those documents
-   |
-   v
-retrieve up to 8 passages
-   |
-   v
-shared answer model
-```
+![Document routing: a router reads the document maps, selects the relevant documents, and passages are searched only inside those documents before answering.](docs/images/long-document-indexing/document-router.svg)
 
 The baseline skips document routing:
 
-```text
-question
-   |
-   v
-dense search across all passages
-   |
-   v
-retrieve up to 8 passages
-   |
-   v
-shared answer model
-```
+![Flat baseline: the question is searched against all passages in the case, and the results go straight to the answer model.](docs/images/long-document-indexing/simple-baseline.svg)
 
 Both paths use the same dense-retrieval backend and answer model.
 
@@ -131,6 +98,8 @@ For a step-by-step code-level view of this lifecycle, see the [Repository Walkth
 ## Systems Compared
 
 The six map systems differ only in how they construct the document map.
+
+![The six map-construction strategies side by side: stuffing, map-reduce, refine, hierarchical mapping, outline-then-fill, and agentic mapping, each starting from the same source document and ending in a document map.](docs/images/long-document-indexing/map-strategies.svg)
 
 | System | What it does |
 | --- | --- |
