@@ -1,21 +1,22 @@
 # Long Document Indexing
 
-Legal research usually involves multiple multi-page documents. A case file grows over
-time and may contain complaints, motions, exhibits, court orders, settlement agreements,
-and later enforcement decisions. The documents describe different stages of the same
-matter, often using different language for the same people, events, and legal issues.
+This repository studies whether **document maps** can help a retrieval-augmented
+generation (RAG) system identify which documents should be searched for evidence. The
+reference experiment uses Multi-LexSum legal case files and compares a dense-retrieval
+baseline with six document-map strategies. Every system answers the same questions,
+uses the same answer model, and is scored against the same retrieval labels.
+
+Legal research often involves a large number of multi-page documents. A case file can
+grow to thousands of pages over time and may contain complaints, motions, exhibits,
+court orders, and other material. Importantly, these documents describe different
+stages of the same matter, often using different language for the same people, events,
+and legal issues.
 
 A retrieval system that provides useful answers may therefore depend on evidence spread
 across the case file. For example, a question could require connecting an allegation in
 a complaint with a later court ruling and the remedy recorded in a settlement (a
 multi-hop question). The relevant evidence is distributed across passages and documents
 that play different roles in the case.
-
-This repository studies whether **document maps** can help a RAG system identify which
-documents should be searched for that distributed evidence. The reference experiment
-uses Multi-LexSum legal case files and compares a dense-retrieval baseline with six
-document-map strategies. Every system answers the same questions, uses the same answer
-model, and is scored against the same retrieval labels.
 
 The reference experiment uses Azure OpenAI deployments configured through Microsoft
 Foundry for map generation, routing, answer generation, embeddings, and model-based
@@ -26,6 +27,57 @@ The central research question is:
 
 > Does a structured map of each document help a RAG system route complex questions to
 > the documents that contain the required evidence?
+
+[Quick Start](#quick-start) ·
+[How It Works](#how-map-based-rag-works-in-this-repository) ·
+[Run the Legal Benchmark](#run-the-legal-benchmark) ·
+[Outputs](#where-to-find-the-output) ·
+[Metrics](#what-the-benchmark-measures) ·
+[Repository Walkthrough](docs/repo-walkthrough.md)
+
+## Quick Start
+
+Run these commands from the root of a local checkout of this repository.
+
+Requirements:
+
+- Python 3.12 or 3.13;
+- [`uv`](https://docs.astral.sh/uv/).
+
+Install the development dependencies:
+
+```bash
+uv sync --python 3.13 --extra dev
+```
+
+The package installs a command-line program named `ldi`, short for Long Document
+Indexing. The `ldi run` command reads an experiment configuration and runs the benchmark.
+
+Run all seven systems on the small deterministic fixture:
+
+```bash
+uv run --python 3.13 --no-editable \
+  --reinstall-package long-document-indexing \
+  ldi run --config configs/experiments/advanced-systems-smoke.yaml
+```
+
+This run uses local fake models and does not require Azure credentials or paid model
+calls. It builds indexes, runs questions through all seven systems, calculates metrics,
+and writes reports. Use it to check the software workflow; its fake-model scores do not
+measure legal retrieval quality.
+
+Results are written to `artifacts/advanced-systems-smoke/`. Start with
+`artifacts/advanced-systems-smoke/report/results.md` for a readable summary.
+
+Run the tests:
+
+```bash
+uv run --python 3.13 --extra dev pytest
+```
+
+The following sections explain the retrieval approach. To run it against legal case
+files with Azure model deployments, continue with
+[Run the Legal Benchmark](#run-the-legal-benchmark).
 
 ## The Retrieval Problem
 
@@ -118,7 +170,7 @@ QUERYING
 question
    |
    v
-LLM router reads the complete document maps
+LLM router reads the complete document maps for the case
    |
    v
 select up to 3 documents
@@ -168,178 +220,9 @@ information and whether that difference affects retrieval.
 | `outline_then_fill` | Creates a document outline first, then fills its sections from the source. |
 | `agentic_map` | Uses a bounded inspect-and-revise loop to find and fill missing coverage. |
 
-## What the Benchmark Measures
-
-The extended comparison uses:
-
-- 20 Multi-LexSum legal case files;
-- 60 hand-curated questions;
-- 20 single-document questions;
-- 20 multi-document questions;
-- 20 chained multi-document questions;
-- 7 retrieval systems, producing 420 answer runs.
-
-Each benchmark question is stored as JSON with its gold-standard answer and supporting
-evidence. See for example:
-
-```json
-{
-  "query": "Across the complaint and consent decree, what workplace discrimination was alleged and how much did Brown Publishing agree to pay William Hubbard?",
-  "ground_truth": {
-    "expected_answer": "The complaint alleged a racially hostile work environment at the Xenia facility, and Brown Publishing agreed to pay William Hubbard $24,750 without admitting liability.",
-    "relevant_document_ids": [
-      "EE-OH-0071:doc_0001",
-      "EE-OH-0071:doc_0003"
-    ],
-    "relevant_segment_ids": [
-      "EE-OH-0071:doc_0001:seg_0001",
-      "EE-OH-0071:doc_0003:seg_0001"
-    ],
-    "evidence": [
-      {
-        "document_id": "EE-OH-0071:doc_0001",
-        "segment_id": "EE-OH-0071:doc_0001:seg_0001",
-        "quote": "racially hostile work environment at its Xenia, Ohio facility"
-      },
-      {
-        "document_id": "EE-OH-0071:doc_0003",
-        "segment_id": "EE-OH-0071:doc_0003:seg_0001",
-        "quote": "Without admitting liability, Brown Publishing agrees to pay the sum of $24,750.00 to William Hubbard"
-      }
-    ]
-  }
-}
-```
-
-During evaluation, each system's generated answer and citations are compared with the
-gold documents, passages, and quotes shown above.
-
-The 60 benchmark questions are stored in
-[`rag-qa-extended.jsonl`](benchmarks/multilexsum/rag-qa-extended.jsonl), one question per
-line. Each question includes its gold-standard answer, required documents and passages,
-and supporting quotes.
-
-The benchmark uses a fixed set of 20 Multi-LexSum cases. The
-[case manifest](benchmarks/multilexsum/rag-qa-extended-case-manifest.json) lists those
-cases and the dataset version they come from, so every run loads the same source
-documents.
-
-### Primary Routing Metrics
-
-These metrics directly measure whether document maps help select the required documents.
-
-| Metric | What it measures |
-| --- | --- |
-| `document_recall_at_1` | The fraction of required documents found in the first document choice. |
-| `document_recall_at_3` | The fraction of required documents found in the first three choices. |
-| `mrr` | How highly the first required document was ranked. |
-| `required_document_coverage` | Whether every required document was selected. |
-
-### Downstream Retrieval Metrics
-
-Every document-map system uses the same dense passage retriever. These metrics show how
-the routing decision affects the passages that retriever finds.
-
-| Metric | What it measures |
-| --- | --- |
-| `segment_recall_at_4` | The fraction of required passages found in the first four results. |
-| `context_precision_at_4` | Whether relevant passages were ranked ahead of irrelevant passages in the first four results. |
-| `context_recall_at_4` | The fraction of labeled evidence found in the first four results. |
-| `evidence_quote_recall_at_4` | The fraction of gold evidence quotes present in the first four retrieved passages. |
-
-### Supporting Metrics
-
-These metrics describe the maps, citations, generated answers, and operational cost of
-each system.
-
-#### Map Construction
-
-| Metric | What it measures |
-| --- | --- |
-| `map_schema_validity` | The fraction of saved maps that can be loaded as valid document maps. |
-| `map_source_reference_validity` | The fraction of source references that point to existing passages in the correct document. |
-| `map_compression_ratio` | The size of the document maps relative to the source documents. |
-| `map_completion_rate` | The fraction of source documents for which a map was created. |
-
-#### Citations
-
-| Metric | What it measures |
-| --- | --- |
-| `citation_precision` | The fraction of generated citations that point to required documents or passages. |
-| `citation_recall` | The fraction of required documents or passages covered by the generated citations. |
-| `citation_support_rate` | The fraction of citation quotes found in the source location they cite. |
-| `invalid_citation_rate` | The fraction of citations that point to an unknown document or passage. |
-
-#### Answer Comparison
-
-| Metric | What it measures |
-| --- | --- |
-| `answer_reference_token_precision` | How much of the generated answer's wording overlaps the gold-standard answer. |
-| `answer_reference_token_recall` | How much of the gold-standard answer's wording appears in the generated answer. |
-| `answer_reference_token_f1` | The balance between answer token precision and recall. |
-
-#### Runtime and Usage
-
-| Metric | What it measures |
-| --- | --- |
-| `query_duration_ms` | Time spent processing one question. |
-| `tool_calls` | Query-stage operations: retrieval for the baseline, and routing plus retrieval for map-based systems. |
-
-The usage report separately records model calls and input and output tokens for indexing
-and querying.
-
-#### Foundry Model-Judge Metrics
-
-| Metric | What it measures |
-| --- | --- |
-| `groundedness` | Whether the answer is supported by the retrieved context. |
-| `relevance` | Whether the answer addresses the question. |
-| `retrieval` | The quality of the retrieved context. |
-| `document_retrieval` | Whether the selected documents match the required documents. |
-| `response_completeness` | Whether the answer covers the information in the gold-standard answer. |
-
-The routing, retrieval, map, citation, and answer-comparison scores computed by the
-repository range from 0 to 1. Higher is better, except for `invalid_citation_rate`.
-`map_compression_ratio`, runtime, and usage describe trade-offs rather than quality.
-Foundry model judges use their own scoring scales.
-
-## Try It Locally
-
-Requirements:
-
-- Python 3.12 or 3.13;
-- [`uv`](https://docs.astral.sh/uv/).
-
-Install the development dependencies:
-
-```bash
-uv sync --python 3.13 --extra dev
-```
-
-The package installs a command-line program named `ldi`, short for Long Document
-Indexing. The `ldi run` command reads an experiment configuration and runs the benchmark.
-
-Run all seven systems on the small deterministic fixture:
-
-```bash
-uv run --python 3.13 --no-editable \
-  --reinstall-package long-document-indexing \
-  ldi run --config configs/experiments/advanced-systems-smoke.yaml
-```
-
-This run uses local fake models, so it gives the same results each time and does not
-require Azure credentials or paid model calls. It builds indexes, runs questions through
-all seven systems, calculates metrics, and writes reports.
-
-Run the tests:
-
-```bash
-uv run --python 3.13 --extra dev pytest
-```
-
-Results are written to `artifacts/advanced-systems-smoke/`.
-
 ## Run the Legal Benchmark
+
+Complete the installation in [Quick Start](#quick-start) before following these steps.
 
 The reference legal experiment runs against Azure OpenAI deployments configured through
 Microsoft Foundry. Calls to these deployments can incur Azure usage charges. Start with
@@ -421,12 +304,132 @@ when that rebuild is intentional. `--force` rebuilds everything.
 The configured model-call and token limits are safety ceilings. They are not estimates of
 the amount the run should consume.
 
-## Evaluate and Inspect the Results
+The same command also calculates local metrics and writes reports. Start with the
+outputs below; the additional Foundry evaluation steps are optional.
 
-The main `ldi run` command already computes deterministic local metrics and writes the
-report. The two following commands add different Foundry workflows.
+## Where to Find the Output
 
-### Run Foundry model judges
+Each experiment writes to `artifacts/<experiment-id>/`:
+
+```text
+artifacts/<experiment-id>/
+  indexes/                 built dense indexes and document maps
+  runs/                    one normalized answer record per system and question
+  evaluations/
+    local-metrics.jsonl    deterministic metric records
+    foundry/               exported datasets and optional Foundry evaluation results
+  report/
+    results.md             readable metric tables
+    results.csv            metric means
+    confidence-intervals.csv
+    system-summary.csv     one comparison row per system
+    usage-summary.csv      model calls and tokens by system
+    summary.json           complete report data
+```
+
+Start with `report/results.md` for a readable summary and `report/system-summary.csv` for
+cross-system analysis. Inspect `indexes/<system>/maps/` to see the actual generated maps,
+and `runs/<system>.jsonl` to trace a question through selected documents, retrieved
+passages, answer text, and citations.
+
+The next section explains the main metrics in those reports. For the full output layout
+and a code-level account of how the files are produced, see the
+[Repository Walkthrough](docs/repo-walkthrough.md).
+
+## What the Benchmark Measures
+
+The extended comparison uses:
+
+- 20 Multi-LexSum legal case files;
+- 60 hand-curated questions: 20 single-document, 20 multi-document, and 20 chained
+  multi-document questions;
+- 7 retrieval systems, producing 420 answer runs.
+
+Each benchmark question is stored as JSON with its gold-standard answer and supporting
+evidence. The following excerpt shows the fields used for evaluation:
+
+```json
+{
+  "query": "Across the complaint and consent decree, what workplace discrimination was alleged and how much did Brown Publishing agree to pay William Hubbard?",
+  "ground_truth": {
+    "expected_answer": "The complaint alleged a racially hostile work environment at the Xenia facility, and Brown Publishing agreed to pay William Hubbard $24,750 without admitting liability.",
+    "relevant_document_ids": [
+      "EE-OH-0071:doc_0001",
+      "EE-OH-0071:doc_0003"
+    ],
+    "relevant_segment_ids": [
+      "EE-OH-0071:doc_0001:seg_0001",
+      "EE-OH-0071:doc_0003:seg_0001"
+    ],
+    "evidence": [
+      {
+        "document_id": "EE-OH-0071:doc_0001",
+        "segment_id": "EE-OH-0071:doc_0001:seg_0001",
+        "quote": "racially hostile work environment at its Xenia, Ohio facility"
+      },
+      {
+        "document_id": "EE-OH-0071:doc_0003",
+        "segment_id": "EE-OH-0071:doc_0003:seg_0001",
+        "quote": "Without admitting liability, Brown Publishing agrees to pay the sum of $24,750.00 to William Hubbard"
+      }
+    ]
+  }
+}
+```
+
+During evaluation, each system's selected documents, retrieved passages, answer, and
+citations are scored against the corresponding labels above.
+
+The 60 benchmark questions are stored in
+[`rag-qa-extended.jsonl`](benchmarks/multilexsum/rag-qa-extended.jsonl), one question per
+line. Each question includes its gold-standard answer, required documents and passages,
+and supporting quotes.
+
+The benchmark uses a fixed set of 20 Multi-LexSum cases. The
+[case manifest](benchmarks/multilexsum/rag-qa-extended-case-manifest.json) lists those
+cases and the dataset version they come from, so every run loads the same source
+documents.
+
+### Primary Routing Metrics
+
+These metrics directly measure whether document maps help select the required documents.
+
+For the flat-vector baseline, document-level metrics use the first three distinct
+document IDs appearing in its ranked list of up to eight retrieved passages. The
+baseline does not run a separate document router.
+
+| Metric | What it measures |
+| --- | --- |
+| `document_recall_at_1` | The fraction of required documents found in the first document choice. |
+| `document_recall_at_3` | The fraction of required documents found in the first three choices. |
+| `mrr` | How highly the first required document was ranked. |
+| `required_document_coverage` | Whether every required document was selected. |
+
+### Downstream Retrieval Metrics
+
+Every document-map system uses the same dense passage retriever. These metrics show how
+the routing decision affects the passages that retriever finds. All systems can return
+up to eight passages; the local retrieval metrics below inspect the first four.
+
+| Metric | What it measures |
+| --- | --- |
+| `segment_recall_at_4` | The fraction of required passages found in the first four results. |
+| `context_precision_at_4` | Whether relevant passages were ranked ahead of irrelevant passages in the first four results. |
+| `context_recall_at_4` | The fraction of required passages found in the first four results. |
+| `evidence_quote_recall_at_4` | The fraction of gold evidence quotes found in the first four passages, after normalizing case and whitespace. |
+
+The benchmark also records map validity and completion, citation checks, answer-reference
+wording overlap, runtime, and model usage. Complete definitions, including the optional
+Foundry evaluators, are in the [Metrics Reference](docs/metrics.md).
+
+## Optional Foundry Evaluation
+
+The main `ldi run` command already computes local metrics and writes the report. The
+following commands are optional: one runs additional Foundry evaluators; the other
+publishes deterministic benchmark metrics as portal-visible runs. Neither reruns
+indexing, retrieval, or answer generation.
+
+### Run Foundry evaluators
 
 Preview the managed evaluation:
 
@@ -447,8 +450,14 @@ uv run --python 3.13 --extra foundry --extra multilexsum \
   --config configs/experiments/foundry-multilexsum-legal-rag-qa-role-separated-extended.yaml
 ```
 
-The extended config judges the same deterministic 20% sample for every system. It
+The extended config evaluates the same deterministic 20% sample for every system. It
 checkpoints each system/evaluator pair, so a retry can reuse completed work.
+
+The configured evaluators include model-based checks for groundedness, relevance,
+retrieval quality, and response completeness. The `document_retrieval` evaluator
+compares retrieval results with ground-truth relevance labels; it does not use an LLM
+judge. See the [Metrics Reference](docs/metrics.md#foundry-evaluators) for the complete
+list.
 
 ### Publish seven comparable runs to Foundry
 
@@ -470,34 +479,10 @@ Rerunning the same names reuses completed, unchanged systems.
 
 Managed evaluation and portal publication are separate:
 
-- `evaluate-foundry-managed` runs model-based evaluators and saves their results locally.
+- `evaluate-foundry-managed` runs the configured Foundry evaluators and saves their
+  results locally.
 - `publish-foundry-evals` publishes the deterministic benchmark metrics as visible,
   system-by-system Foundry runs.
-
-## Where to Find the Output
-
-Each experiment writes to `artifacts/<experiment-id>/`:
-
-```text
-artifacts/<experiment-id>/
-  indexes/                 built dense indexes and document maps
-  runs/                    one normalized answer record per system and question
-  evaluations/
-    local-metrics.jsonl    deterministic metric records
-    foundry/               exported datasets, plans, checkpoints, and results
-  report/
-    results.md             readable metric tables
-    results.csv            metric means
-    confidence-intervals.csv
-    system-summary.csv     one comparison row per system
-    usage-summary.csv      model calls and tokens by system
-    summary.json           complete report data
-```
-
-Start with `report/results.md` for a readable summary and `report/system-summary.csv` for
-cross-system analysis. Inspect `indexes/<system>/maps/` to see the actual generated maps,
-and `runs/<system>.jsonl` to trace a question through selected documents, retrieved
-passages, answer text, and citations.
 
 ## Repository Guide
 
@@ -514,9 +499,10 @@ passages, answer text, and citations.
 | `src/long_document_indexing/reporting.py` | Markdown, CSV, and JSON reports. |
 | `tests/` | Unit and integration tests. |
 
-For a code-level tour, continue with
-[Repository Walkthrough](docs/repo-walkthrough.md). For details about the legal
-questions and dataset licensing, read
+For a code-level tour, continue with the
+[Repository Walkthrough](docs/repo-walkthrough.md). For complete metric definitions,
+read the [Metrics Reference](docs/metrics.md). For details about the legal questions
+and dataset licensing, read the
 [Multi-LexSum benchmark notes](benchmarks/multilexsum/README.md).
 
 ## Scope and Safety

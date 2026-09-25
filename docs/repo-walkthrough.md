@@ -1,12 +1,12 @@
 # Repository Walkthrough
 
-The [README](../README.md) explains the research question, document maps, metrics, and
-setup. This document follows one benchmark run through the repository so that you can
-see where the data is loaded, where each retrieval system runs, and where the results
-are written.
+The [README](../README.md) explains the research question, document maps, main metrics,
+and setup. This document follows one benchmark run through the repository so that you
+can see where the data is loaded, where each retrieval system runs, and where the
+results are written.
 
 The main entry point is an experiment YAML file. The command-line program is called
-`ldi`, short for Long Document Indexing. When you run `ldi` with an experiment file,
+`ldi`, short for Long Document Indexing. When you run `ldi run` with an experiment file,
 the repository performs the following steps:
 
 ```text
@@ -27,6 +27,10 @@ save answers, routing decisions, and retrieved passages
       v
 calculate metrics and write reports
 ```
+
+`ldi run` performs these stages in order. The separate `prepare`, `index`, `query`,
+`evaluate`, and `report` commands expose the same lifecycle stages individually. Each
+command takes the experiment file through `--config`.
 
 The reference experiment is
 [`foundry-multilexsum-legal-rag-qa-role-separated-extended.yaml`](../configs/experiments/foundry-multilexsum-legal-rag-qa-role-separated-extended.yaml).
@@ -58,9 +62,12 @@ document-map systems. The flat-vector baseline also returns up to eight passages
 The YAML is parsed and validated by
 [`config.py`](../src/long_document_indexing/config.py). The model values in the
 reference config resolve to Azure deployment names supplied through environment
-variables, normally loaded from `.env`. See the
+variables, normally loaded from `.env`. See
 [Run the Legal Benchmark](../README.md#run-the-legal-benchmark) and
 [`.env.example`](../.env.example) for the required values.
+
+The resolved configuration tells the dataset loader which cases and questions to load
+in the next stage.
 
 ## 2. Cases and Questions
 
@@ -90,6 +97,9 @@ The fields required for each loaded question are defined by `BenchmarkItem` in
 loading, the rest of the repository works with the same `Corpus` and `BenchmarkItem`
 objects regardless of where the data came from.
 
+The `Corpus` objects provide the documents to index. The `BenchmarkItem` objects provide
+the questions to run and the labels used later for evaluation.
+
 ## 3. Models, Storage, and Retrieval
 
 Before indexing begins, the CLI creates the resources used by every system:
@@ -105,6 +115,9 @@ experiment configuration in
 [`cli.py`](../src/long_document_indexing/cli.py). This gives every system the same
 model roles, retrieval backend, storage rules, and prompt-loading mechanism for a
 controlled comparison.
+
+The indexing stage uses these services to build an `IndexArtifact` for each system
+and case.
 
 ## 4. Building the Indexes
 
@@ -158,12 +171,16 @@ uses the common `DocumentMap` and `MapEntry` structures defined in
 [`maps.py`](../src/long_document_indexing/domain/maps.py).
 
 Indexing results are saved after each case. Several map-building strategies also save
-intermediate checkpoints while processing long documents. When `--resume` is used, the
+intermediate checkpoints while processing long documents. With resume enabled, the
 repository checks that each saved artifact still exists and has the current index
 signature, which is a fingerprint of the settings used to build it. The fingerprint
 covers the retrieval backend, embedding model, map-building model and prompts, and
-relevant configuration. A mismatch makes the artifact stale, and replacing stale work
-requires the explicit `--allow-stale-recompute` option.
+relevant configuration. A mismatch makes the artifact stale; use
+`--allow-stale-recompute` only when replacing stale work is intentional. The separate
+`--force` option rebuilds everything.
+
+The saved `IndexArtifact` is passed to query execution so the next stage can reuse the
+dense index and, for map-based systems, the document maps.
 
 ## 5. Running a Question
 
@@ -185,9 +202,9 @@ top 8 passages
 answer model -> answer and citations
 ```
 
-The baseline has no separate document-selection step. For document-level metrics, its
-selected documents are the first unique document IDs found in its ranked passage
-results.
+For the flat-vector baseline, document-level metrics use the first three distinct
+document IDs appearing in its ranked list of up to eight retrieved passages. The
+baseline does not run a separate document router.
 
 ### Document-Map Query
 
@@ -225,6 +242,8 @@ passages to the answer model. The model returns a structured answer with citatio
 each citation must identify one of the retrieved evidence records. The code then assigns
 the corresponding document and passage IDs to that citation.
 
+Both query paths return the same `RagRunRecord` structure, described below.
+
 ## 6. The Standard Run Record
 
 Every system writes the result of one question as a `RagRunRecord`, defined in
@@ -245,6 +264,9 @@ compare all seven systems.
 
 ## 7. Evaluation and Reporting
 
+`ldi run` already performs local evaluation and reporting. Use `ldi evaluate` or
+`ldi report` separately to recalculate metrics or regenerate reports from saved outputs.
+
 `ldi evaluate` reads the run records and the expected answers, documents, passages, and
 quotes from the question set. It calculates the configured local metrics directly,
 without a judge model. It also reads the saved index artifacts when calculating
@@ -253,30 +275,34 @@ map-construction metrics. The metric implementations are in
 runner is
 [`runner.py`](../src/long_document_indexing/evaluation/runner.py).
 
-The results answer three kinds of question:
+The results address three parts of the pipeline:
 
 1. **Document routing:** Did the system select the documents required by the question?
 2. **Downstream retrieval:** Did the fixed passage retriever find the labeled evidence
    after document selection?
-3. **Supporting checks:** Were maps valid, citations supported, answers complete, and
-   the runtime and token use acceptable?
+3. **Supporting checks:** Map validity, citation-quote matching, answer-reference wording
+   overlap, runtime, and token use.
 
-The [What the Benchmark Measures](../README.md#what-the-benchmark-measures) section
-defines every metric reported by the reference experiment.
+The README's
+[What the Benchmark Measures](../README.md#what-the-benchmark-measures) section introduces
+the routing and retrieval metrics. The [Metrics Reference](metrics.md) defines the full
+set and distinguishes lexical comparisons from model-based answer evaluation.
 
 When Foundry evaluation is enabled, `ldi evaluate` also exports the completed run
-records as a 420-row evaluation dataset. Two later commands use that export for
-different purposes:
+records as an evaluation dataset. For the complete extended experiment, this export
+contains 420 rows. Two optional commands use that export for different purposes:
 
-- `ldi evaluate-foundry-managed` runs model-based Foundry evaluators such as
-  groundedness, relevance, and response completeness. The reference config evaluates a
-  fixed 20% sample for each system and checkpoints each evaluator separately.
+- `ldi evaluate-foundry-managed` runs the configured Foundry evaluators. These include
+  model-based checks such as groundedness, relevance, and response completeness, and
+  the label-based `document_retrieval` evaluator. The reference config evaluates the
+  same fixed 20% sample for every system and checkpoints each evaluator separately.
 - `ldi publish-foundry-evals` creates one portal-visible run per system and applies the
   deterministic retrieval, citation, and answer-overlap graders used for the Foundry
   comparison view.
 
 Neither command reruns indexing, retrieval, or answer generation. They evaluate and
-publish the saved benchmark outputs.
+publish the saved benchmark outputs. The commands are documented in
+[Optional Foundry Evaluation](../README.md#optional-foundry-evaluation).
 
 `ldi report` aggregates the metric records and usage ledgers into Markdown, CSV, and
 JSON summaries. The reporting code is in
@@ -297,7 +323,7 @@ artifacts/<experiment-id>/
     <system>.jsonl                      one full result per question
   evaluations/
     local-metrics.jsonl                 individual deterministic metric values
-    foundry/                            exported datasets and Foundry results
+    foundry/                            exports and optional Foundry results
   costs/
     index-usage.jsonl                   indexing tokens, calls, and duration
     query-usage.jsonl                   query tokens, calls, and duration
@@ -311,15 +337,15 @@ artifacts/<experiment-id>/
     summary.json                        complete machine-readable report
 ```
 
-Start with `report/results.md` for the comparison. Open `system-summary.csv` when you
-want one row per system, and `results.csv` when you want every metric. To investigate a
-specific result, find the question in `runs/<system>.jsonl`, then inspect the selected
-documents, retrieved passages, answer, and citations stored in that record.
+Start with `report/results.md` for the comparison. Open `system-summary.csv` for one row
+per system, and `results.csv` for every metric. To investigate a specific result, find
+the question in `runs/<system>.jsonl`, then inspect the selected documents, retrieved
+passages, answer, and citations stored in that record.
 
 ## 9. Running the Repository
 
 After completing the installation steps in
-[Try It Locally](../README.md#try-it-locally), run all seven systems with local fixtures
+[Quick Start](../README.md#quick-start), run all seven systems with local fixtures
 and fake model clients:
 
 ```bash
@@ -348,15 +374,18 @@ uv run --python 3.13 \
   --dry-run-budget
 ```
 
-The full setup, role-separated smoke test, extended run, managed evaluation, and Foundry
-publication commands are in
-[Run the Legal Benchmark](../README.md#run-the-legal-benchmark). You can also
-run the lifecycle phases separately with `ldi prepare`, `ldi index`, `ldi query`,
-`ldi evaluate`, and `ldi report` when you are investigating one stage.
+The setup, role-separated smoke test, and extended run commands are in
+[Run the Legal Benchmark](../README.md#run-the-legal-benchmark). The additional evaluator
+and publication commands are in
+[Optional Foundry Evaluation](../README.md#optional-foundry-evaluation).
+
+You can also run the lifecycle phases separately with `ldi prepare`, `ldi index`,
+`ldi query`, `ldi evaluate`, and `ldi report` when investigating one stage. Use the same
+`--config` path to work with the same experiment and its saved artifacts.
 
 ## 10. Finding the Code You Need
 
-| If you want to understand or change... | Start here |
+| To understand or change... | Start here |
 | --- | --- |
 | Experiment settings | [`experiments/`](../configs/experiments) |
 | Per-system settings | [`systems/`](../configs/systems) |
