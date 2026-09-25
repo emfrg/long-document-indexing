@@ -1,6 +1,6 @@
 # Repository Walkthrough
 
-The [README](../README.md) explains the research question, document maps, main metrics,
+The [README](../README.md) explains the research question, document maps, benchmark,
 and setup. This document follows one benchmark run through the repository so that you
 can see where the data is loaded, where each retrieval system runs, and where the
 results are written.
@@ -63,7 +63,7 @@ The YAML is parsed and validated by
 [`config.py`](../src/long_document_indexing/config.py). The model values in the
 reference config resolve to Azure deployment names supplied through environment
 variables, normally loaded from `.env`. See
-[Run the Legal Benchmark](../README.md#run-the-legal-benchmark) and
+[Run the Multi-LexSum Benchmark](../README.md#run-the-multi-lexsum-benchmark) and
 [`.env.example`](../.env.example) for the required values.
 
 The resolved configuration tells the dataset loader which cases and questions to load
@@ -284,7 +284,7 @@ The results address three parts of the pipeline:
    overlap, runtime, and token use.
 
 The README's
-[What the Benchmark Measures](../README.md#what-the-benchmark-measures) section introduces
+[Benchmark](../README.md#benchmark) section introduces
 the routing and retrieval metrics. The [Metrics Reference](metrics.md) defines the full
 set and distinguishes lexical comparisons from model-based answer evaluation.
 
@@ -360,7 +360,7 @@ This run checks the full software workflow. Use its scores to confirm expected t
 behavior; the Multi-LexSum experiment provides the retrieval comparison.
 
 After completing the setup in
-[Run the Legal Benchmark](../README.md#run-the-legal-benchmark), preview the budget
+[Run the Multi-LexSum Benchmark](../README.md#run-the-multi-lexsum-benchmark), preview the budget
 before making model calls:
 
 ```bash
@@ -375,7 +375,7 @@ uv run --python 3.13 \
 ```
 
 The setup, role-separated smoke test, and extended run commands are in
-[Run the Legal Benchmark](../README.md#run-the-legal-benchmark). The additional evaluator
+[Run the Multi-LexSum Benchmark](../README.md#run-the-multi-lexsum-benchmark). The additional evaluator
 and publication commands are in
 [Optional Foundry Evaluation](../README.md#optional-foundry-evaluation).
 

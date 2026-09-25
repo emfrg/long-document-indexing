@@ -1,132 +1,55 @@
 # Long Document Indexing
 
-This repository studies whether **document maps** can help a retrieval-augmented
-generation (RAG) system identify which documents should be searched for evidence. The
-reference experiment uses Multi-LexSum legal case files and compares a dense-retrieval
-baseline with six document-map strategies. Every system answers the same questions,
-uses the same answer model, and is scored against the same retrieval labels.
+Companion repository for [Long Document Indexing for RAG](ARTICLE_URL).
 
-Legal research often involves a large number of multi-page documents. A case file can
-grow to thousands of pages over time and may contain complaints, motions, exhibits,
-court orders, and other material. Importantly, these documents describe different
-stages of the same matter, often using different language for the same people, events,
-and legal issues.
+This repository implements and evaluates **document maps** as a document-routing layer for retrieval-augmented generation (RAG) over long, multi-document collections.
 
-A retrieval system that provides useful answers may therefore depend on evidence spread
-across the case file. For example, a question could require connecting an allegation in
-a complaint with a later court ruling and the remedy recorded in a settlement (a
-multi-hop question). The relevant evidence is distributed across passages and documents
-that play different roles in the case.
+The reference benchmark uses Multi-LexSum legal case files and compares a standard dense-retrieval baseline with six ways of constructing a document map. All systems use the same passage retriever and answer model; the main experimental difference is whether a document-level routing step narrows the search before passage retrieval.
 
-The reference experiment uses Azure OpenAI deployments configured through Microsoft
-Foundry for map generation, routing, answer generation, embeddings, and model-based
-evaluation. A deterministic local smoke test is also included; it requires no Azure
-credentials or paid API calls.
+The central question is:
 
-The central research question is:
+> Can a structured representation of each document help a RAG system route complex questions to the documents that contain the required evidence?
 
-> Does a structured map of each document help a RAG system route complex questions to
-> the documents that contain the required evidence?
+The repository includes:
 
-[Quick Start](#quick-start) ·
-[How It Works](#how-map-based-rag-works-in-this-repository) ·
-[Run the Legal Benchmark](#run-the-legal-benchmark) ·
-[Outputs](#where-to-find-the-output) ·
-[Metrics](#what-the-benchmark-measures) ·
-[Repository Walkthrough](docs/repo-walkthrough.md)
+- seven retrieval systems: one flat baseline and six document-map strategies;
+- a fixed 60-question benchmark over 20 Multi-LexSum case files;
+- deterministic local evaluation and reporting;
+- optional Microsoft Foundry evaluation workflows;
+- local smoke fixtures that run without Azure credentials or paid model calls.
 
-## Quick Start
+## How It Works
 
-Run these commands from the root of a local checkout of this repository.
+### The retrieval problem
 
-Requirements:
-
-- Python 3.12 or 3.13;
-- [`uv`](https://docs.astral.sh/uv/).
-
-Install the development dependencies:
-
-```bash
-uv sync --python 3.13 --extra dev
-```
-
-The package installs a command-line program named `ldi`, short for Long Document
-Indexing. The `ldi run` command reads an experiment configuration and runs the benchmark.
-
-Run all seven systems on the small deterministic fixture:
-
-```bash
-uv run --python 3.13 --no-editable \
-  --reinstall-package long-document-indexing \
-  ldi run --config configs/experiments/advanced-systems-smoke.yaml
-```
-
-This run uses local fake models and does not require Azure credentials or paid model
-calls. It builds indexes, runs questions through all seven systems, calculates metrics,
-and writes reports. Use it to check the software workflow; its fake-model scores do not
-measure legal retrieval quality.
-
-Results are written to `artifacts/advanced-systems-smoke/`. Start with
-`artifacts/advanced-systems-smoke/report/results.md` for a readable summary.
-
-Run the tests:
-
-```bash
-uv run --python 3.13 --extra dev pytest
-```
-
-The following sections explain the retrieval approach. To run it against legal case
-files with Azure model deployments, continue with
-[Run the Legal Benchmark](#run-the-legal-benchmark).
-
-## The Retrieval Problem
-
-A basic RAG system splits documents into passages, or chunks, embeds those passages, and
-retrieves the passages most similar to a question:
+A standard RAG system typically splits documents into passages, embeds them, and retrieves the passages most similar to a question:
 
 ```text
 question -> search every passage -> top passages -> answer model
 ```
 
-Semantic similarity retrieval scores each chunk independently against the question. It
-can miss evidence for multi-hop questions, where a chunk becomes relevant through its
-relationship to evidence elsewhere. Long individual documents make this harder by
-distributing related information across many chunks and separating each chunk from the
-document's broader structure. Multi-document case files add a distinct challenge:
-complaints, orders, and settlements play different roles, which chunk-level similarity
-does not explicitly represent.
+For long, multi-document collections, a question may depend on evidence spread across several documents. In a legal case file, for example, the complaint, a later court order, and a settlement may each contain a different part of the answer.
 
-- Evidence may be distributed across several documents.
-- Terminology may change between the complaint, later filings, and the final decision.
-- A chunk may match the topic but come from the wrong stage of the case.
-- Splitting a long document into chunks can obscure relationships between distant
-  sections and the document's overall structure.
+This repository separates retrieval into two stages:
 
-This repository focuses on the document-level step: constructing maps when documents are
-ingested, then using those maps to route each question to the most relevant documents.
-After routing, every map-based system uses the same dense retriever to find passages
-inside the selected documents. The experiment holds this passage-retrieval step fixed
-across systems. Its metrics show whether document routing improves the
-context ultimately provided to the answer model.
+1. **Document routing** — decide which documents are likely to contain the required evidence.
+2. **Passage retrieval** — search the original passages inside those documents.
 
-## What Is a Document Map?
+The experiment changes the first stage while keeping the second stage fixed.
 
-A document map is a document-level representation created when source documents are
-ingested. It organizes the document's main contents into structured entries. Each entry
-tells the router what the document contains.
+### Document maps
+
+A **document map** is a structured representation of a source document created during ingestion. It provides a compact view of the document's contents while keeping its entries linked to the original passages.
 
 Each map contains:
 
 - an overview of the document;
 - entries for important facts, events, claims, decisions, or other topics;
-- references from every entry back to the source document and source passages.
+- references from those entries back to the source passages.
 
-The core data model is in
-[`maps.py`](src/long_document_indexing/domain/maps.py).
-A map entry has a `kind`, `label`, `summary`, and `source_references`. Entries may also
-have attributes and child entries.
+The shared data model is defined in [`maps.py`](src/long_document_indexing/domain/maps.py). A map entry has a `kind`, `label`, `summary`, and `source_references`, with optional attributes and child entries.
 
-This is a selected entry from an actual map generated by the extended benchmark:
+A generated entry looks like this:
 
 ```yaml
 document_id: CJ-AL-0007:doc_0001
@@ -147,91 +70,161 @@ entry:
       segment_ids: [CJ-AL-0007:doc_0001:seg_0008]
 ```
 
-Map entries include references to their associated source passages. These references
-support quality checks on map construction. The agentic map builder also uses them to
-identify source passages that are not yet represented in the map.
+### Indexing
 
-## How Map-Based RAG Works in This Repository
-
-For each of the six document-map systems, the repository creates two representations of
-the source material: document maps for routing and a dense passage index for evidence
-retrieval.
+Every map-based system creates two representations of the source material:
 
 ```text
-INDEXING
-
-source document -> ordered passages -> map-building method -> document map
+source document -> ordered passages -> map-building strategy -> document map
        |
-       +---------------------------> dense passage index
+       +----------------------------> dense passage index
+```
 
+The document map is used for routing. The dense index stores the original source passages used for evidence retrieval.
 
-QUERYING
+The flat-vector baseline creates only the dense passage index.
 
+### Querying
+
+For a map-based system:
+
+```text
 question
    |
    v
-LLM router reads the complete document maps for the case
+router reads document maps
    |
    v
 select up to 3 documents
    |
    v
-dense search over raw passages from those documents
+dense search inside those documents
    |
    v
-retrieve up to 8 raw evidence passages
+retrieve up to 8 passages
    |
    v
-shared answer model -> answer and citations
+shared answer model
 ```
 
-The router uses the document maps to select documents. The dense retriever then finds
-relevant passages in those documents, and the original passages are sent to the answer
-model.
-
-The flat-vector baseline does not use document maps or a document router:
+The baseline skips document routing:
 
 ```text
-question -> dense search over every raw passage -> top 8 passages -> shared answer model
+question
+   |
+   v
+dense search across all passages
+   |
+   v
+retrieve up to 8 passages
+   |
+   v
+shared answer model
 ```
 
-Both paths use the same dense retrieval backend and answer model. Therefore, the main
-experimental difference is whether document-map routing narrows the search before
-passage retrieval.
+Both paths use the same dense-retrieval backend and answer model.
 
-The shared map query flow is implemented in
-[`map_base.py`](src/long_document_indexing/systems/map_base.py).
-The baseline is implemented in
-[`flat_vector.py`](src/long_document_indexing/systems/flat_vector.py).
+The shared map query flow is implemented in [`map_base.py`](src/long_document_indexing/systems/map_base.py), and the baseline is implemented in [`flat_vector.py`](src/long_document_indexing/systems/flat_vector.py).
+
+For a step-by-step code-level view of this lifecycle, see the [Repository Walkthrough](docs/repo-walkthrough.md).
 
 ## Systems Compared
 
-All six map systems use the query flow above. They differ only in how they construct each
-document map. The benchmark tests whether those construction methods preserve different
-information and whether that difference affects retrieval.
+The six map systems differ only in how they construct the document map.
 
 | System | What it does |
 | --- | --- |
-| `flat_vector` | Baseline. Searches raw passages across the whole case without maps or document routing. |
-| `stuffing` | Sends the whole document to the map builder in one call when it fits the context limit. |
-| `map_reduce` | Maps document parts independently, then merges those partial maps. |
+| `flat_vector` | Baseline. Searches raw passages across the whole case without document maps or routing. |
+| `stuffing` | Sends the whole document to the map builder in one call when it fits the configured input limit. |
+| `map_reduce` | Maps document parts independently, then recursively combines the partial maps. |
 | `refine` | Reads passages in order and updates one evolving map after each passage. |
-| `hierarchical_map` | Builds small maps, then combines them through several levels. |
-| `outline_then_fill` | Creates a document outline first, then fills its sections from the source. |
-| `agentic_map` | Uses a bounded inspect-and-revise loop to find and fill missing coverage. |
+| `hierarchical_map` | Builds maps for small groups of neighboring passages, then combines them through several levels. |
+| `outline_then_fill` | Creates a document outline first, fills its sections from source passages, then assembles the final map. |
+| `agentic_map` | Uses a bounded inspect-and-revise loop to identify and fill missing passage coverage. |
 
-## Run the Legal Benchmark
+Their implementations are in [`src/long_document_indexing/systems/`](src/long_document_indexing/systems/). Per-system settings are stored under [`configs/systems/`](configs/systems/).
 
-Complete the installation in [Quick Start](#quick-start) before following these steps.
+## Benchmark
 
-The reference legal experiment runs against Azure OpenAI deployments configured through
-Microsoft Foundry. Calls to these deployments can incur Azure usage charges. Start with
-the two-case smoke configuration before running the 20-case comparison.
+The reference comparison uses:
 
-### 1. Create the model deployments
+- **20 Multi-LexSum legal case files**;
+- **60 hand-curated questions**;
+- 20 single-document questions;
+- 20 multi-document questions;
+- 20 chained multi-document questions;
+- **7 retrieval systems**, producing 420 system-question runs.
 
-The configuration separates five model roles. Environment values must be the names of
-deployments that already exist in your Azure resource.
+Each question contains:
+
+- an expected answer;
+- the document IDs required to answer it;
+- the relevant passage IDs;
+- supporting evidence quotes.
+
+The fixed question set is stored in [`rag-qa-extended.jsonl`](benchmarks/multilexsum/rag-qa-extended.jsonl). The [`case manifest`](benchmarks/multilexsum/rag-qa-extended-case-manifest.json) records the selected cases and dataset revision.
+
+The benchmark evaluates two retrieval stages separately:
+
+- **document routing** — whether the required documents were selected;
+- **passage retrieval** — whether the labeled evidence was recovered after document selection.
+
+It also records map validity and completion, citation checks, answer-reference overlap, runtime, and model usage.
+
+For exact metric definitions, see [`docs/metrics.md`](docs/metrics.md).
+
+## Quick Start
+
+The local smoke benchmark exercises the complete repository workflow without Azure credentials or paid model calls.
+
+Requirements:
+
+- Python 3.12 or 3.13;
+- [`uv`](https://docs.astral.sh/uv/).
+
+Install the development dependencies:
+
+```bash
+uv sync --python 3.13 --extra dev
+```
+
+Run all seven systems on the deterministic local fixture:
+
+```bash
+uv run --python 3.13 --no-editable \
+  --reinstall-package long-document-indexing \
+  ldi run --config configs/experiments/advanced-systems-smoke.yaml
+```
+
+The smoke configuration uses fake model clients. It is intended to verify the software workflow, not to measure retrieval quality.
+
+`ldi run` executes the complete experiment lifecycle:
+
+```text
+prepare -> index -> query -> evaluate -> report
+```
+
+Outputs are written to:
+
+```text
+artifacts/advanced-systems-smoke/
+```
+
+Run the test suite with:
+
+```bash
+uv run --python 3.13 --extra dev pytest
+```
+
+## Run the Multi-LexSum Benchmark
+
+The reference legal experiment uses Azure OpenAI deployments configured through Microsoft Foundry.
+
+Calls to those deployments can incur Azure usage charges. A two-case Azure smoke configuration is included so that the setup can be checked before running the complete 20-case benchmark.
+
+### 1. Configure the model deployments
+
+The experiment separates five model roles:
 
 | Role | Environment variable | Model used in the reference run |
 | --- | --- | --- |
@@ -241,17 +234,15 @@ deployments that already exist in your Azure resource.
 | Evaluation judge | `FOUNDRY_JUDGE_MODEL` | GPT-5 |
 | Passage embeddings | `FOUNDRY_EMBEDDING_MODEL` | text-embedding-3-large |
 
-The role variables may point to the same deployment, but they do not have to. Separate
-names make the experiment and its costs easier to inspect.
+The role variables may point to the same deployment.
 
-### 2. Configure the local environment
+Create the local environment file:
 
 ```bash
 cp .env.example .env
 ```
 
-Fill in `.env` with your endpoint, API key, deployment names, and Foundry project
-endpoint. Do not commit `.env`.
+Fill in `.env` with the required endpoint, API key, deployment names, and Foundry project endpoint. Do not commit `.env`.
 
 Install the optional dependencies:
 
@@ -259,10 +250,9 @@ Install the optional dependencies:
 uv sync --python 3.13 --extra dev --extra foundry --extra multilexsum
 ```
 
-API-key inference does not require Azure CLI login. Publishing results to the Foundry
-portal uses your Azure identity and may require `az login`.
+API-key inference does not require Azure CLI login. Publishing evaluation runs to the Foundry portal uses your Azure identity and may require `az login`.
 
-### 3. Run the two-case smoke benchmark
+### 2. Run the Azure smoke benchmark
 
 ```bash
 uv run --python 3.13 --extra foundry --extra multilexsum \
@@ -271,12 +261,11 @@ uv run --python 3.13 --extra foundry --extra multilexsum \
   --config configs/experiments/foundry-multilexsum-legal-rag-qa-role-separated-smoke.yaml
 ```
 
-Use this run to verify the endpoint, deployments, quotas, structured outputs, embeddings,
-and report generation before starting the larger extended run.
+Use this run to verify the endpoint, deployments, quotas, structured outputs, embeddings, and report generation.
 
-### 4. Preview and run the 20-case comparison
+### 3. Preview the full benchmark
 
-First inspect what will be reused, rebuilt, or queried:
+Before making model calls for the extended run:
 
 ```bash
 uv run --python 3.13 --extra foundry --extra multilexsum \
@@ -286,7 +275,7 @@ uv run --python 3.13 --extra foundry --extra multilexsum \
   --dry-run-budget
 ```
 
-Then run it:
+### 4. Run the 20-case comparison
 
 ```bash
 uv run --python 3.13 --extra foundry --extra multilexsum \
@@ -295,141 +284,30 @@ uv run --python 3.13 --extra foundry --extra multilexsum \
   --config configs/experiments/foundry-multilexsum-legal-rag-qa-role-separated-extended.yaml
 ```
 
-The run writes checkpoints as it progresses. Repeating the same command reuses valid
-indexes and successful answers, and retries missing or failed work. If an existing
-artifact no longer matches the current inputs, the command stops before making model
-calls to replace it. Review `--dry-run-budget`, then use `--allow-stale-recompute` only
-when that rebuild is intentional. `--force` rebuilds everything.
+The run writes checkpoints as it progresses. Repeating the command reuses valid indexes and successful answers and retries missing or failed work.
 
-The configured model-call and token limits are safety ceilings. They are not estimates of
-the amount the run should consume.
+If an existing artifact no longer matches the current inputs, the command stops rather than silently replacing it. Use `--allow-stale-recompute` when replacing stale work is intentional. `--force` rebuilds everything.
 
-The same command also calculates local metrics and writes reports. Start with the
-outputs below; the additional Foundry evaluation steps are optional.
+The configured model-call and token limits are safety ceilings, not expected usage estimates.
 
-## Where to Find the Output
+## Evaluation
 
-Each experiment writes to `artifacts/<experiment-id>/`:
+`ldi run` automatically computes the configured local metrics after query execution and then writes the experiment report.
 
-```text
-artifacts/<experiment-id>/
-  indexes/                 built dense indexes and document maps
-  runs/                    one normalized answer record per system and question
-  evaluations/
-    local-metrics.jsonl    deterministic metric records
-    foundry/               exported datasets and optional Foundry evaluation results
-  report/
-    results.md             readable metric tables
-    results.csv            metric means
-    confidence-intervals.csv
-    system-summary.csv     one comparison row per system
-    usage-summary.csv      model calls and tokens by system
-    summary.json           complete report data
-```
+The local evaluation includes:
 
-Start with `report/results.md` for a readable summary and `report/system-summary.csv` for
-cross-system analysis. Inspect `indexes/<system>/maps/` to see the actual generated maps,
-and `runs/<system>.jsonl` to trace a question through selected documents, retrieved
-passages, answer text, and citations.
+- document-routing metrics;
+- passage-retrieval metrics;
+- map validity and completion checks;
+- citation metrics;
+- lexical answer-reference comparisons;
+- runtime and usage metrics.
 
-The next section explains the main metrics in those reports. For the full output layout
-and a code-level account of how the files are produced, see the
-[Repository Walkthrough](docs/repo-walkthrough.md).
+The implementations are under [`src/long_document_indexing/evaluation/local/`](src/long_document_indexing/evaluation/local/), and the complete definitions are documented in the [Metrics Reference](docs/metrics.md).
 
-## What the Benchmark Measures
+### Optional Foundry evaluation
 
-The extended comparison uses:
-
-- 20 Multi-LexSum legal case files;
-- 60 hand-curated questions: 20 single-document, 20 multi-document, and 20 chained
-  multi-document questions;
-- 7 retrieval systems, producing 420 answer runs.
-
-Each benchmark question is stored as JSON with its gold-standard answer and supporting
-evidence. The following excerpt shows the fields used for evaluation:
-
-```json
-{
-  "query": "Across the complaint and consent decree, what workplace discrimination was alleged and how much did Brown Publishing agree to pay William Hubbard?",
-  "ground_truth": {
-    "expected_answer": "The complaint alleged a racially hostile work environment at the Xenia facility, and Brown Publishing agreed to pay William Hubbard $24,750 without admitting liability.",
-    "relevant_document_ids": [
-      "EE-OH-0071:doc_0001",
-      "EE-OH-0071:doc_0003"
-    ],
-    "relevant_segment_ids": [
-      "EE-OH-0071:doc_0001:seg_0001",
-      "EE-OH-0071:doc_0003:seg_0001"
-    ],
-    "evidence": [
-      {
-        "document_id": "EE-OH-0071:doc_0001",
-        "segment_id": "EE-OH-0071:doc_0001:seg_0001",
-        "quote": "racially hostile work environment at its Xenia, Ohio facility"
-      },
-      {
-        "document_id": "EE-OH-0071:doc_0003",
-        "segment_id": "EE-OH-0071:doc_0003:seg_0001",
-        "quote": "Without admitting liability, Brown Publishing agrees to pay the sum of $24,750.00 to William Hubbard"
-      }
-    ]
-  }
-}
-```
-
-During evaluation, each system's selected documents, retrieved passages, answer, and
-citations are scored against the corresponding labels above.
-
-The 60 benchmark questions are stored in
-[`rag-qa-extended.jsonl`](benchmarks/multilexsum/rag-qa-extended.jsonl), one question per
-line. Each question includes its gold-standard answer, required documents and passages,
-and supporting quotes.
-
-The benchmark uses a fixed set of 20 Multi-LexSum cases. The
-[case manifest](benchmarks/multilexsum/rag-qa-extended-case-manifest.json) lists those
-cases and the dataset version they come from, so every run loads the same source
-documents.
-
-### Primary Routing Metrics
-
-These metrics directly measure whether document maps help select the required documents.
-
-For the flat-vector baseline, document-level metrics use the first three distinct
-document IDs appearing in its ranked list of up to eight retrieved passages. The
-baseline does not run a separate document router.
-
-| Metric | What it measures |
-| --- | --- |
-| `document_recall_at_1` | The fraction of required documents found in the first document choice. |
-| `document_recall_at_3` | The fraction of required documents found in the first three choices. |
-| `mrr` | How highly the first required document was ranked. |
-| `required_document_coverage` | Whether every required document was selected. |
-
-### Downstream Retrieval Metrics
-
-Every document-map system uses the same dense passage retriever. These metrics show how
-the routing decision affects the passages that retriever finds. All systems can return
-up to eight passages; the local retrieval metrics below inspect the first four.
-
-| Metric | What it measures |
-| --- | --- |
-| `segment_recall_at_4` | The fraction of required passages found in the first four results. |
-| `context_precision_at_4` | Whether relevant passages were ranked ahead of irrelevant passages in the first four results. |
-| `context_recall_at_4` | The fraction of required passages found in the first four results. |
-| `evidence_quote_recall_at_4` | The fraction of gold evidence quotes found in the first four passages, after normalizing case and whitespace. |
-
-The benchmark also records map validity and completion, citation checks, answer-reference
-wording overlap, runtime, and model usage. Complete definitions, including the optional
-Foundry evaluators, are in the [Metrics Reference](docs/metrics.md).
-
-## Optional Foundry Evaluation
-
-The main `ldi run` command already computes local metrics and writes the report. The
-following commands are optional: one runs additional Foundry evaluators; the other
-publishes deterministic benchmark metrics as portal-visible runs. Neither reruns
-indexing, retrieval, or answer generation.
-
-### Run Foundry evaluators
+The repository also supports Foundry evaluators over the saved benchmark outputs. These are separate from the main `ldi run` lifecycle and do not rerun indexing, retrieval, or answer generation.
 
 Preview the managed evaluation:
 
@@ -441,27 +319,9 @@ uv run --python 3.13 --extra foundry --extra multilexsum \
   --dry-run
 ```
 
-Run it:
+Remove `--dry-run` to execute it.
 
-```bash
-uv run --python 3.13 --extra foundry --extra multilexsum \
-  --no-editable --reinstall-package long-document-indexing \
-  ldi evaluate-foundry-managed \
-  --config configs/experiments/foundry-multilexsum-legal-rag-qa-role-separated-extended.yaml
-```
-
-The extended config evaluates the same deterministic 20% sample for every system. It
-checkpoints each system/evaluator pair, so a retry can reuse completed work.
-
-The configured evaluators include model-based checks for groundedness, relevance,
-retrieval quality, and response completeness. The `document_retrieval` evaluator
-compares retrieval results with ground-truth relevance labels; it does not use an LLM
-judge. See the [Metrics Reference](docs/metrics.md#foundry-evaluators) for the complete
-list.
-
-### Publish seven comparable runs to Foundry
-
-Preview the publication plan:
+The repository can also publish the deterministic benchmark metrics as comparable system-by-system runs in Foundry:
 
 ```bash
 uv run --python 3.13 --extra foundry --extra multilexsum \
@@ -473,51 +333,59 @@ uv run --python 3.13 --extra foundry --extra multilexsum \
   --dry-run
 ```
 
-Remove `--dry-run` to publish. The command creates one 60-row Foundry run for each
-system, making the seven systems directly comparable in the Foundry Evaluations table.
-Rerunning the same names reuses completed, unchanged systems.
+Remove `--dry-run` to publish.
 
-Managed evaluation and portal publication are separate:
+## Outputs
 
-- `evaluate-foundry-managed` runs the configured Foundry evaluators and saves their
-  results locally.
-- `publish-foundry-evals` publishes the deterministic benchmark metrics as visible,
-  system-by-system Foundry runs.
+Each experiment writes its generated artifacts under:
+
+```text
+artifacts/<experiment-id>/
+```
+
+The main outputs are:
+
+- `indexes/` — dense indexes, document maps, and index metadata;
+- `runs/` — one normalized run record per system and question;
+- `evaluations/` — local metrics and optional Foundry evaluation artifacts;
+- `report/` — Markdown, CSV, and JSON experiment summaries.
+
+Start with `report/results.md` for the generated experiment report. To trace a particular question through the system, inspect the corresponding record in `runs/<system>.jsonl`.
+
+A more detailed description of the artifact structure is available in the [Repository Walkthrough](docs/repo-walkthrough.md).
 
 ## Repository Guide
 
 | Path | What it contains |
 | --- | --- |
-| `benchmarks/` | Versioned questions, labels, smoke data, and case manifests. |
-| `configs/experiments/` | Complete experiment definitions. |
-| `configs/systems/` | Settings for each retrieval and map-building method. |
-| `prompts/` | Prompts used to build maps, route questions, and answer. |
-| `src/long_document_indexing/datasets/` | Dataset loaders and validation. |
-| `src/long_document_indexing/systems/` | The seven systems being compared. |
+| `benchmarks/` | Versioned benchmark questions, labels, smoke data, and case manifests. |
+| `configs/experiments/` | Complete experiment configurations. |
+| `configs/systems/` | Per-system retrieval and map-construction settings. |
+| `prompts/` | Prompts used for map construction, routing, and answering. |
+| `src/long_document_indexing/datasets/` | Dataset adapters and validation. |
+| `src/long_document_indexing/systems/` | Retrieval systems and map-construction strategies. |
 | `src/long_document_indexing/retrieval/` | Dense and local retrieval backends. |
 | `src/long_document_indexing/evaluation/` | Local metrics and Foundry integration. |
-| `src/long_document_indexing/reporting.py` | Markdown, CSV, and JSON reports. |
+| `src/long_document_indexing/reporting.py` | Markdown, CSV, and JSON report generation. |
 | `tests/` | Unit and integration tests. |
 
-For a code-level tour, continue with the
-[Repository Walkthrough](docs/repo-walkthrough.md). For complete metric definitions,
-read the [Metrics Reference](docs/metrics.md). For details about the legal questions
-and dataset licensing, read the
-[Multi-LexSum benchmark notes](benchmarks/multilexsum/README.md).
+Additional documentation:
 
-## Scope and Safety
+- [Repository Walkthrough](docs/repo-walkthrough.md) — follows an experiment through the codebase from configuration to reporting.
+- [Metrics Reference](docs/metrics.md) — exact definitions and interpretation of the evaluation metrics.
+- [Multi-LexSum benchmark notes](benchmarks/multilexsum/README.md) — dataset adapter, benchmark assets, and licensing notes.
 
-This is an experimental benchmark, not a production legal research system. It is built
-to compare retrieval strategies under controlled conditions.
+## Extending the Benchmark
 
-For long paid runs, it provides:
+The repository uses shared corpus, benchmark, index, and run-record structures so that new components can reuse the existing execution and evaluation pipeline.
 
-- incremental checkpoints and writes that do not leave half-written files;
-- retries for transient model and embedding failures;
-- compatibility checks that prevent silent reuse of out-of-date files;
-- explicit model-call and token ceilings;
-- validation that blocks incomplete runs from being evaluated or published;
-- source IDs on map entries, retrieved passages, and citations.
+To add a dataset, implement a loader that returns the shared corpus and benchmark objects and register it in [`datasets/registry.py`](src/long_document_indexing/datasets/registry.py).
 
-These controls make interrupted experiments recoverable and results inspectable. They do
-not make model output legally authoritative.
+To add a retrieval system, implement the `RagSystem` interface and register it in [`systems/registry.py`](src/long_document_indexing/systems/registry.py).
+
+See the [Repository Walkthrough](docs/repo-walkthrough.md) for the relevant interfaces and execution flow.
+
+## Scope
+
+This repository is an experimental benchmark for comparing retrieval strategies,
+not a production legal research application.

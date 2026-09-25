@@ -1,8 +1,8 @@
 # Metrics Reference
 
 This reference defines the metrics used by the extended Multi-LexSum comparison. The
-[README](../README.md#what-the-benchmark-measures) introduces the benchmark and its main
-retrieval metrics. The [Repository Walkthrough](repo-walkthrough.md#7-evaluation-and-reporting)
+[README](../README.md#benchmark) introduces the benchmark. The
+[Repository Walkthrough](repo-walkthrough.md#7-evaluation-and-reporting)
 explains how evaluation reads the saved run records and produces reports.
 
 `ldi run` computes the configured local metrics and writes the report. Foundry
