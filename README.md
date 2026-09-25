@@ -111,7 +111,7 @@ The six map systems differ only in how they construct the document map.
 | `outline_then_fill` | Creates a document outline first, fills its sections from source passages, then assembles the final map. |
 | `agentic_map` | Uses a bounded inspect-and-revise loop to identify and fill missing passage coverage. |
 
-Their implementations are in [`src/long_document_indexing/systems/`](src/long_document_indexing/systems/). Per-system settings are stored under [`configs/systems/`](configs/systems/).
+See the [system implementations](src/long_document_indexing/systems/). Per-system settings are stored in the [per-system configurations](configs/systems/).
 
 ## Benchmark
 
@@ -140,7 +140,12 @@ The benchmark evaluates two retrieval stages separately:
 
 It also records map validity and completion, citation checks, answer-reference overlap, runtime, and model usage.
 
-For exact metric definitions, see [`docs/metrics.md`](docs/metrics.md).
+For exact metric definitions, see the [Metrics Reference](docs/metrics.md).
+
+The aggregate results reported in the companion article are preserved in the
+[versioned benchmark results](results/foundry-multilexsum-legal-rag-qa-role-separated-extended/README.md).
+Start with the [readable benchmark report](results/foundry-multilexsum-legal-rag-qa-role-separated-extended/results.md)
+for the system scorecard, metric tables, and usage summary.
 
 ## Quick Start
 
@@ -272,7 +277,7 @@ The local evaluation includes:
 - lexical answer-reference comparisons;
 - runtime and usage metrics.
 
-The implementations are under [`src/long_document_indexing/evaluation/local/`](src/long_document_indexing/evaluation/local/), and the complete definitions are documented in the [Metrics Reference](docs/metrics.md).
+The [local metric implementations](src/long_document_indexing/evaluation/local/) are documented in the [Metrics Reference](docs/metrics.md).
 
 ### Optional Foundry evaluation
 
@@ -320,6 +325,10 @@ The main outputs are:
 - `report/` — Markdown, CSV, and JSON experiment summaries.
 
 Start with `report/results.md` for the generated experiment report. To trace a particular question through the system, inspect the corresponding record in `runs/<system>.jsonl`.
+
+The [versioned benchmark results](results/foundry-multilexsum-legal-rag-qa-role-separated-extended/README.md)
+provide a compact, committed snapshot of the reference experiment's aggregate reports.
+This snapshot is separate from the generated local artifacts above.
 
 A more detailed description of the artifact structure is available in the [Repository Walkthrough](docs/repo-walkthrough.md).
 
