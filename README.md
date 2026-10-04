@@ -1,6 +1,6 @@
 # Long Document Indexing
 
-Companion repository for [Long Document Indexing for RAG](ARTICLE_URL).
+Companion repository for [Long Document Indexing for RAG](https://dunderscore.ai/blog/long-document-indexing-for-rag).
 
 This repository implements and evaluates **document maps** as a document-routing layer for retrieval-augmented generation (RAG) over long, multi-document collections.
 
